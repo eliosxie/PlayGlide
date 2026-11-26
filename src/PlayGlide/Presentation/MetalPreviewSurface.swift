@@ -2259,8 +2259,22 @@ private final class PreviewRenderer: NSObject, CAMetalDisplayLinkDelegate {
     private let mailbox: FrameMailbox
     private let surface: DisplaySurface
     private let currentDrawableSize: @Sendable () -> VideoSize
+    private final class GPUExecutionTracker: Sendable {
+        private let peak = Mutex<Double>(0)
+        func record(_ seconds: Double) {
+            peak.withLock { $0 = max($0, seconds) }
+        }
+        func drain() -> Double {
+            peak.withLock { value in
+                let current = value
+                value = 0
+                return current
+            }
+        }
+    }
     private var displayClock = DisplayClock()
     private var selectionBudget = DrawableSelectionBudget()
+    private let latestGPUExecution = GPUExecutionTracker()
     private var scanoutRecovery = ScanoutLatencyRecovery()
     private let wakesOnFrameReadiness = ProcessInfo.processInfo.environment["PLAYGLIDE_PREVIEW_READY_WAKE"] != "0"
     private let advancesLateSelectionHorizon = ProcessInfo.processInfo.environment["PLAYGLIDE_LATE_ADVANCE"] != "0"
@@ -2410,6 +2424,10 @@ private final class PreviewRenderer: NSObject, CAMetalDisplayLinkDelegate {
         }
         let selection: (sourceTime: Double, generation: UUID?)?
         if lateSelection {
+            let gpuDuration = latestGPUExecution.drain()
+            if gpuDuration > 0 {
+                selectionBudget.recordGPUExecution(seconds: gpuDuration)
+            }
             let submissionDeadline = displayUpdate.targetTimestamp
             let delay = selectionBudget.selectionDelay(now: started, deadline: submissionDeadline)
             let advance: Double
@@ -2540,9 +2558,16 @@ private final class PreviewRenderer: NSObject, CAMetalDisplayLinkDelegate {
                         drawable: actualSize, target: targetTime)
                 }
             }
+            let latestGPUExecution = self.latestGPUExecution
             command.addCompletedHandler { completed in
                 withExtendedLifetime(frame) {}
                 mailbox.releaseGPU()
+                let gpuDuration =
+                    completed.gpuEndTime > completed.gpuStartTime
+                    ? completed.gpuEndTime - completed.gpuStartTime : 0
+                if gpuDuration > 0 {
+                    latestGPUExecution.record(gpuDuration)
+                }
                 mailbox.mutate(frame.generation) {
                     $0.commandCompletionLatency.record(capturedAt: submittedAt, presentedAt: mediaHostTime())
                     if let error = completed.error {
@@ -2550,8 +2575,8 @@ private final class PreviewRenderer: NSObject, CAMetalDisplayLinkDelegate {
                             "GPU 呈现失败：\(error.localizedDescription)",
                             "GPU presentation failed: \(error.localizedDescription)")
                     }
-                    if completed.gpuEndTime > completed.gpuStartTime {
-                        $0.renderMilliseconds = (completed.gpuEndTime - completed.gpuStartTime) * 1000
+                    if gpuDuration > 0 {
+                        $0.renderMilliseconds = gpuDuration * 1000
                     }
                 }
             }

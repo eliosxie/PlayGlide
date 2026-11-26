@@ -351,12 +351,29 @@ struct CaptureClock: Sendable {
 }
 
 struct DrawableSelectionBudget {
+    /// Include completed Metal GPU execution duration in the late-selection submission budget
+    /// (`PLAYGLIDE_BUDGET_GPU_TIME=1` opts in pending real-capture ABBA validation).
+    static var budgetGPUTimeEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_BUDGET_GPU_TIME"] == "1"
+    }
+
     /// Keep 1.8 ms minimum margin before `targetTimestamp` (Direct Metal encode+render takes ~0.3 ms;
-    /// `recordEncoding` dynamically widens the margin for slower paths) while allowing up to 6.0 ms
-    /// late-selection wait on 120 Hz Direct-to-Display scanout.
+    /// `recordEncoding` / `recordGPUExecution` dynamically widen the margin for slower paths) while allowing
+    /// up to 6.0 ms late-selection wait on 120 Hz Direct-to-Display scanout.
     private static let minimumBudget = 0.0018
+    private static let maximumBudget = 0.0065
     private static let maximumDelay = 0.006
+    private static let safetyMargin = 0.0005
+    private var cpuEncodingBudget = 0.0
+    private var gpuExecutionBudget = 0.0
     private var encodingBudget = minimumBudget
+    private let includesGPUTime: Bool
+
+    init(includesGPUTime: Bool = DrawableSelectionBudget.budgetGPUTimeEnabled) {
+        self.includesGPUTime = includesGPUTime
+    }
+
+    var effectiveBudget: Double { encodingBudget }
 
     func selectionDelay(now: Double, deadline: Double) -> Double {
         guard deadline.isFinite, now.isFinite else { return 0 }
@@ -386,7 +403,23 @@ struct DrawableSelectionBudget {
 
     mutating func recordEncoding(seconds: Double) {
         guard seconds.isFinite, seconds >= 0 else { return }
-        encodingBudget = max(Self.minimumBudget, encodingBudget * 0.95, seconds + 0.0005)
+        if includesGPUTime {
+            cpuEncodingBudget = max(cpuEncodingBudget * 0.95, seconds)
+            updateEffectiveBudget()
+        } else {
+            encodingBudget = max(Self.minimumBudget, encodingBudget * 0.95, seconds + Self.safetyMargin)
+        }
+    }
+
+    mutating func recordGPUExecution(seconds: Double) {
+        guard includesGPUTime, seconds.isFinite, seconds >= 0 else { return }
+        gpuExecutionBudget = max(gpuExecutionBudget * 0.95, seconds)
+        updateEffectiveBudget()
+    }
+
+    private mutating func updateEffectiveBudget() {
+        let combined = cpuEncodingBudget + gpuExecutionBudget + Self.safetyMargin
+        encodingBudget = min(Self.maximumBudget, max(Self.minimumBudget, combined))
     }
 }
 
