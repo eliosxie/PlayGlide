@@ -1,10 +1,19 @@
 import CoreMedia
+import Dispatch
 import Foundation
 
 actor PipelineSession {
+    /// Run `PipelineSession` and `FrameProcessor` actors on dedicated `.userInteractive` serial queues
+    /// to prevent QoS dips between capture callbacks and presentation (`PLAYGLIDE_PIPELINE_UI_QOS=1`).
+    static var userInteractiveQoSEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_PIPELINE_UI_QOS"] == "1"
+    }
+
     let generation: UUID
     private(set) var settings: SessionDraft
     let mailbox: FrameMailbox
+    nonisolated let usesUserInteractiveQueue: Bool
+    private let executorQueue: DispatchSerialQueue
     private let source: any VideoCaptureSource
     private let processor: FrameProcessor
     private let windowSource: WindowCaptureSource?
@@ -13,6 +22,12 @@ actor PipelineSession {
     private var stopped = false
     /// Created by `run()` for interpolated sessions and stopped when it returns.
     private(set) var performanceHold: PerformanceHold?
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executorQueue.asUnownedSerialExecutor()
+    }
+
+    func activeQoSClass() -> qos_class_t { qos_class_self() }
 
     private static func usesAdaptiveHarmonicRate(for settings: SessionDraft) -> Bool {
         ContentCadence.dynamicCadenceCapEnabled && settings.source != .window
@@ -32,7 +47,8 @@ actor PipelineSession {
     init(
         settings: SessionDraft, format: CaptureFormatDescriptor?, generation: UUID, mailbox: FrameMailbox,
         windowSource: WindowCaptureSource? = nil, preferFlowTextureViews: Bool = true,
-        performanceHoldSettle: Double = PerformanceHold.settleSeconds
+        performanceHoldSettle: Double = PerformanceHold.settleSeconds,
+        useUserInteractiveQueue: Bool = PipelineSession.userInteractiveQoSEnabled
     ) throws {
         guard settings.isAvailableInBuild else {
             throw PipelineError(AppText("当前版本不支持所选采集设置。", "The selected capture settings are unavailable."))
@@ -41,6 +57,10 @@ actor PipelineSession {
         self.performanceHoldSettle = performanceHoldSettle
         self.generation = generation
         self.mailbox = mailbox
+        self.usesUserInteractiveQueue = useUserInteractiveQueue
+        self.executorQueue = DispatchSerialQueue(
+            label: "PlayGlide.pipeline.session",
+            qos: useUserInteractiveQueue ? .userInteractive : .unspecified)
         self.windowSource = settings.source == .window ? windowSource : nil
         switch settings.source {
         case .testPattern:
@@ -67,7 +87,9 @@ actor PipelineSession {
                 colorMode: settings.colorMode)
         }
         processor = FrameProcessor(
-            settings: settings, generation: generation, mailbox: mailbox, preferFlowTextureViews: preferFlowTextureViews
+            settings: settings, generation: generation, mailbox: mailbox,
+            preferFlowTextureViews: preferFlowTextureViews,
+            useUserInteractiveQueue: useUserInteractiveQueue
         )
         mailbox.configureAudioSynchronization(
             generation, enabled: settings.source == .captureCard && settings.audioEnabled)

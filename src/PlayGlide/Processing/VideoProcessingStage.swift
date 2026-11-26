@@ -1,6 +1,7 @@
 import CoreImage
 import CoreMedia
 import CoreVideo
+import Dispatch
 import Foundation
 import Metal
 import MetalFX
@@ -112,6 +113,8 @@ actor FrameProcessor: VideoProcessingStage {
     private var settings: SessionDraft
     private let generation: UUID
     private let mailbox: FrameMailbox
+    nonisolated let usesUserInteractiveQueue: Bool
+    private let executorQueue: DispatchSerialQueue
     private let preferFlowTextureViews: Bool
     private var usesStableWindowCadence: Bool
     private var plan: ProcessingPlan?
@@ -135,10 +138,23 @@ actor FrameProcessor: VideoProcessingStage {
     private var presentation = LivePresentationController()
     private var activePair: LivePairTiming?
 
-    init(settings: SessionDraft, generation: UUID, mailbox: FrameMailbox, preferFlowTextureViews: Bool = true) {
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executorQueue.asUnownedSerialExecutor()
+    }
+
+    func activeQoSClass() -> qos_class_t { qos_class_self() }
+
+    init(
+        settings: SessionDraft, generation: UUID, mailbox: FrameMailbox, preferFlowTextureViews: Bool = true,
+        useUserInteractiveQueue: Bool = PipelineSession.userInteractiveQoSEnabled
+    ) {
         self.settings = settings
         self.generation = generation
         self.mailbox = mailbox
+        self.usesUserInteractiveQueue = useUserInteractiveQueue
+        self.executorQueue = DispatchSerialQueue(
+            label: "PlayGlide.frame.processor",
+            qos: useUserInteractiveQueue ? .userInteractive : .unspecified)
         self.preferFlowTextureViews = preferFlowTextureViews
         usesStableWindowCadence = settings.usesStableWindowCadence
     }
