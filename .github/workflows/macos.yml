@@ -47,6 +47,7 @@ jobs:
           app="$RUNNER_TEMP/PlayGlide/Build/Products/Release/PlayGlide.app"
           xcrun lipo -verify_arch arm64 "$app/Contents/MacOS/PlayGlide"
           test -f "$app/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"
+          test -f "$app/Contents/Resources/AppIcon.icns"
           if xcrun --sdk macosx metal --version >/dev/null 2>&1; then
             metal_sources=()
             while IFS= read -r -d '' shader_path; do

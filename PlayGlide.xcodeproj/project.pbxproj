@@ -25,6 +25,7 @@
 		5FBA7A4A89DD7549B667C36E /* PerformanceHold.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5174E1AFD3965970FD29135 /* PerformanceHold.swift */; };
 		7A0FA20040EF3E59E98A56C8 /* PlayGlideApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84DC34E118F6D3D5814550BC /* PlayGlideApp.swift */; };
 		7DBE5001C9E4B613C70ABF64 /* WorkspaceModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8D6704D17678C6D012D2CDC /* WorkspaceModel.swift */; };
+		7E12CB01CDD1C7C87859F261 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 904CCB5C61762D1FA807F0FE /* Assets.xcassets */; };
 		8531198D7AFCF581B3383EA8 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = C877720D9EA9E49893A7C79C /* InfoPlist.strings */; };
 		87FC3738BF501165E4E108E9 /* MetalFX.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AEBCF79A7F3428FAAC9B6599 /* MetalFX.framework */; };
 		9597BD8AFB2087A4B2D3CCE2 /* CoreImage.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E30BFDDDD0C451BE2F6AB941 /* CoreImage.framework */; };
@@ -66,6 +67,7 @@
 		84DC34E118F6D3D5814550BC /* PlayGlideApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayGlideApp.swift; sourceTree = "<group>"; };
 		87FAE01DE21207891F3D074C /* SpatialUpscaler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpatialUpscaler.swift; sourceTree = "<group>"; };
 		8C194E383891639F8C5B9973 /* AVFoundationCaptureSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AVFoundationCaptureSource.swift; sourceTree = "<group>"; };
+		904CCB5C61762D1FA807F0FE /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		96BDE2D170B8B9D461477B33 /* WindowCaptureSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowCaptureSource.swift; sourceTree = "<group>"; };
 		A7336A3FD78739D4EDF00F99 /* SessionDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionDraft.swift; sourceTree = "<group>"; };
 		A8D6704D17678C6D012D2CDC /* WorkspaceModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceModel.swift; sourceTree = "<group>"; };
@@ -208,6 +210,7 @@
 		7C03D6AD794DF3F738D5FEEC /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				904CCB5C61762D1FA807F0FE /* Assets.xcassets */,
 				C877720D9EA9E49893A7C79C /* InfoPlist.strings */,
 			);
 			path = Resources;
@@ -311,6 +314,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7E12CB01CDD1C7C87859F261 /* Assets.xcassets in Resources */,
 				8531198D7AFCF581B3383EA8 /* InfoPlist.strings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

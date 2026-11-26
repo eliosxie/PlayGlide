@@ -37,6 +37,18 @@ done < <(/usr/bin/find "$repo_root/src/PlayGlide" -type f -name '*.swift' -print
 
 cp "$repo_root/config/Info.plist" "$preview_info"
 cp -R "$repo_root/src/PlayGlide/Resources/." "$preview_app/Contents/Resources/"
+rm -rf "$preview_app/Contents/Resources/Assets.xcassets"
+
+iconset_source="$repo_root/src/PlayGlide/Resources/Assets.xcassets/AppIcon.appiconset"
+if [[ -d "$iconset_source" ]]; then
+    iconset_stage="$build_directory/AppIcon.iconset"
+    rm -rf "$iconset_stage"
+    mkdir -p "$iconset_stage"
+    cp "$iconset_source"/*.png "$iconset_stage/"
+    /usr/bin/iconutil -c icns "$iconset_stage" -o "$preview_app/Contents/Resources/AppIcon.icns"
+    rm -rf "$iconset_stage"
+    /usr/bin/plutil -replace CFBundleIconFile -string AppIcon "$preview_info"
+fi
 
 # Precompile Metal shaders into default.metallib when the Metal Toolchain component is installed.
 if /usr/bin/xcrun --sdk macosx metal --version >/dev/null 2>&1; then

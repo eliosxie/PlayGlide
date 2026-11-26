@@ -51,6 +51,7 @@ targets:
       - sdk: ScreenCaptureKit.framework
     settings:
       base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_BUNDLE_IDENTIFIER: com.eliosxie.PlayGlide
         CODE_SIGN_STYLE: Automatic
         ENABLE_HARDENED_RUNTIME: YES
