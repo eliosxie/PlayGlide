@@ -1,0 +1,96 @@
+name: macOS build and release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build and package PlayGlide
+        shell: bash
+        run: |
+          build_settings=(CODE_SIGNING_ALLOWED=NO SWIFT_ACTIVE_COMPILATION_CONDITIONS=
+            "CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER")
+          package=PlayGlide-macOS-arm64
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+              echo "::error::Use a version tag such as v0.1.0 or v0.1.0-beta.1."
+              exit 1
+            fi
+            build_settings+=("MARKETING_VERSION=${BASH_REMATCH[1]}")
+            package="PlayGlide-${GITHUB_REF_NAME}-macOS-arm64"
+          fi
+
+          xcodebuild -version
+          xcodebuild -project PlayGlide.xcodeproj -scheme PlayGlide -configuration Release \
+            -destination 'platform=macOS,arch=arm64' -derivedDataPath "$RUNNER_TEMP/PlayGlide" \
+            "${build_settings[@]}" build
+
+          app="$RUNNER_TEMP/PlayGlide/Build/Products/Release/PlayGlide.app"
+          xcrun lipo -verify_arch arm64 "$app/Contents/MacOS/PlayGlide"
+          test -f "$app/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"
+          codesign --force --sign - --options runtime --entitlements config/PlayGlide.entitlements "$app"
+          codesign --verify --strict "$app"
+
+          image_root="$RUNNER_TEMP/dmg-root"
+          mkdir -p "$image_root" dist
+          ditto "$app" "$image_root/PlayGlide.app"
+          ln -s /Applications "$image_root/Applications"
+          hdiutil create -volname PlayGlide -srcfolder "$image_root" -format UDZO "dist/$package.dmg"
+          hdiutil verify "dist/$package.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "dist/$package.zip"
+          cd dist
+          shasum -a 256 "$package.dmg" "$package.zip" > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: PlayGlide-macOS-arm64
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: PlayGlide-macOS-arm64
+          path: dist
+      - name: Publish GitHub Release
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum --check SHA256SUMS.txt
+          release_options=(--verify-tag --generate-notes --title "PlayGlide $GITHUB_REF_NAME")
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            release_options+=(--prerelease)
+          fi
+          package="PlayGlide-${GITHUB_REF_NAME}-macOS-arm64"
+          gh release create "$GITHUB_REF_NAME" "$package.dmg" "$package.zip" SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" "${release_options[@]}"

@@ -1,0 +1,2 @@
+"NSCameraUsageDescription" = "PlayGlide 读取所选采集卡的视频，用于本地预览和补帧。";
+"NSMicrophoneUsageDescription" = "PlayGlide 读取所选采集卡的音频，用于本地播放和音画同步。";
