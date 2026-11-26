@@ -4,12 +4,80 @@ import Foundation
 import Metal
 import Vision
 
+struct HybridReadinessTiming: Sendable, Equatable {
+    /// Time from VT submission to VT midpoint availability.
+    let vtReady: Double
+    /// Backward media-engine motion estimation duration (B -> A), overlapping with VT.
+    let backwardMotion: Double?
+    /// Forward media-engine motion estimation duration (A -> B), following backward ME.
+    let forwardMotion: Double?
+    /// Extra wall-clock wait strictly after VT midpoint was ready while waiting for ME completion.
+    let motionWait: Double
+    /// Non-overlapping critical-path time from VT submission to midpoint+motion availability.
+    let criticalPath: Double
+
+    static func compute(
+        submittedAt: Double,
+        vtReadyAt: Double,
+        motionStartedAt: Double?,
+        backwardFinishedAt: Double?,
+        forwardFinishedAt: Double?,
+        afterMotionWaitAt: Double
+    ) -> HybridReadinessTiming {
+        let vtReady = max(0, vtReadyAt - submittedAt)
+        let backward: Double? =
+            if let motionStartedAt, let backwardFinishedAt {
+                max(0, backwardFinishedAt - motionStartedAt)
+            } else {
+                nil
+            }
+        let forward: Double? =
+            if let backwardFinishedAt, let forwardFinishedAt {
+                max(0, forwardFinishedAt - backwardFinishedAt)
+            } else {
+                nil
+            }
+        let motionFinished = forwardFinishedAt ?? backwardFinishedAt
+        let motionWait: Double
+        if let motionFinished {
+            motionWait = max(0, motionFinished - vtReadyAt)
+        } else {
+            motionWait = max(0, afterMotionWaitAt - vtReadyAt)
+        }
+        let readyAt = max(vtReadyAt, motionFinished ?? afterMotionWaitAt)
+        let criticalPath = max(0, readyAt - submittedAt)
+        return HybridReadinessTiming(
+            vtReady: vtReady,
+            backwardMotion: backward,
+            forwardMotion: forward,
+            motionWait: motionWait,
+            criticalPath: criticalPath)
+    }
+}
+
 struct OpticalFlowTiming: Sendable {
     let conversion: Double?
     let downscale: Double
     let forward: Double
     let backward: Double
     let reconstruction: Double
+    let hybrid: HybridReadinessTiming?
+
+    init(
+        conversion: Double?,
+        downscale: Double,
+        forward: Double,
+        backward: Double,
+        reconstruction: Double,
+        hybrid: HybridReadinessTiming? = nil
+    ) {
+        self.conversion = conversion
+        self.downscale = downscale
+        self.forward = forward
+        self.backward = backward
+        self.reconstruction = reconstruction
+        self.hybrid = hybrid
+    }
 }
 
 /// Confined to FrameProcessor's actor. Native Vision buffers never leave this executor.

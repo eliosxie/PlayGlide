@@ -35,12 +35,30 @@ final class HybridInterpolator {
         }
     }
 
+    /// Media-engine motion estimation timestamps for separating overlapping ME work from VT wait time.
+    struct MotionTiming: Sendable, Equatable {
+        let startedAt: Double
+        let backwardFinishedAt: Double
+        let forwardFinishedAt: Double?
+    }
+
     /// Hardware motion vectors estimated concurrently with VT on the media engine.
     /// `backward` maps `B → A` (always computed in detail mode); `forward` maps `A → B` when bidirectional
     /// occlusion estimation is enabled (`PLAYGLIDE_HYBRID_BIDIR != "0"`).
     struct MotionFields: Sendable {
         let backward: CVReadOnlyPixelBuffer
         let forward: CVReadOnlyPixelBuffer?
+        let timing: MotionTiming?
+
+        init(
+            backward: CVReadOnlyPixelBuffer,
+            forward: CVReadOnlyPixelBuffer?,
+            timing: MotionTiming? = nil
+        ) {
+            self.backward = backward
+            self.forward = forward
+            self.timing = timing
+        }
     }
 
     private struct HybridPipelines: Sendable {
@@ -535,18 +553,28 @@ final class HybridInterpolator {
             fwdRefB = nil
         }
         return Task {
+            let startedAt = mediaHostTime()
             guard
                 let backward = try? await motionSession.motion(
                     of: refB, comparedTo: refA, flags: .currentBufferWillBeNextReferenceBuffer
                 ).motionVector
             else { return nil }
+            let backwardFinishedAt = mediaHostTime()
             let forward: CVReadOnlyPixelBuffer?
+            let forwardFinishedAt: Double?
             if let forwardSession, let fwdRefA, let fwdRefB {
                 forward = try? await forwardSession.motion(of: fwdRefA, comparedTo: fwdRefB, flags: []).motionVector
+                forwardFinishedAt = forward != nil ? mediaHostTime() : nil
             } else {
                 forward = nil
+                forwardFinishedAt = nil
             }
-            return MotionFields(backward: backward, forward: forward)
+            return MotionFields(
+                backward: backward,
+                forward: forward,
+                timing: MotionTiming(
+                    startedAt: startedAt, backwardFinishedAt: backwardFinishedAt,
+                    forwardFinishedAt: forwardFinishedAt))
         }
     }
 

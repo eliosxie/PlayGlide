@@ -582,12 +582,13 @@ actor FrameProcessor: VideoProcessingStage {
         // Submit ANE VT before kicking off auxiliary 540p downscale + media-engine motion estimation.
         let vtOutputs = Self.streamVTOutputs(hybrid.session, parameters: parameters)
         let motionTask = hybrid.startMotionEstimation(previous: previous, current: current)
-        var ready: [Int: VTFrameProcessorFrame.ReadOnlyFrame] = [:]
+        var ready: [Int: (frame: VTFrameProcessorFrame.ReadOnlyFrame, vtReadyAt: Double)] = [:]
         var nextIndex = 0
         var resolvedMotion: HybridInterpolator.MotionFields?
         var awaitedMotion = false
         do {
             for try await output in vtOutputs {
+                let vtReadyAt = mediaHostTime()
                 guard
                     let index = destinations.firstIndex(where: {
                         CMTimeCompare($0.presentationTimeStamp, output.timeStamp) == 0
@@ -599,13 +600,21 @@ actor FrameProcessor: VideoProcessingStage {
                             "混合插帧返回重复或未知的输出时间戳",
                             "Hybrid interpolation returned a duplicate or unknown output timestamp."))
                 }
-                ready[index] = output
-                while let next = ready.removeValue(forKey: nextIndex) {
+                ready[index] = (output, vtReadyAt)
+                while let entry = ready.removeValue(forKey: nextIndex) {
+                    let next = entry.frame
                     if !awaitedMotion {
                         resolvedMotion = await motionTask?.value
                         awaitedMotion = true
                     }
                     let interpolated = mediaHostTime()
+                    let hybridTiming = HybridReadinessTiming.compute(
+                        submittedAt: downscaled,
+                        vtReadyAt: entry.vtReadyAt,
+                        motionStartedAt: resolvedMotion?.timing?.startedAt,
+                        backwardFinishedAt: resolvedMotion?.timing?.backwardFinishedAt,
+                        forwardFinishedAt: resolvedMotion?.timing?.forwardFinishedAt,
+                        afterMotionWaitAt: interpolated)
                     let deferredRecipe: HybridPreviewRecipe?
                     if HybridInterpolator.deferredComposeEnabled,
                         !plan.spatial || HybridInterpolator.spatialDeferredComposeEnabled
@@ -637,7 +646,8 @@ actor FrameProcessor: VideoProcessingStage {
                     packetFrame.hybridRecipe = deferredRecipe
                     packetFrame.opticalFlowTiming = OpticalFlowTiming(
                         conversion: nil, downscale: nextIndex == 0 ? downscaled - started : 0,
-                        forward: interpolated - downscaled, backward: 0, reconstruction: composed - interpolated)
+                        forward: hybridTiming.vtReady, backward: hybridTiming.motionWait,
+                        reconstruction: composed - interpolated, hybrid: hybridTiming)
                     emit(packetFrame)
                     nextIndex += 1
                 }

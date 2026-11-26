@@ -244,18 +244,31 @@ final class WorkspaceModel: ObservableObject {
                 statistics.longestPresentedInterval * 1000)
             : "—"
         let flow = statistics.opticalFlowLatencies
-        let flowSummary =
-            flow.downscale.isEmpty
-            ? ""
-            : """
-            \(language.text("光流阶段耗时 p50 / p95", "Optical Flow Timing p50 / p95"))
-            \(language.text("输入格式转换（执行时）：", "Input conversion (when used): "))\(values(flow.conversion))
-            \(language.text("缩小参考图：", "Reference downscaling: "))\(values(flow.downscale))
-            \(language.text("前向光流：", "Forward optical flow: "))\(values(flow.forward))
-            \(language.text("后向光流：", "Backward optical flow: "))\(values(flow.backward))
-            \(language.text("原尺寸重建：", "Native-resolution reconstruction: "))\(values(flow.reconstruction))
+        let flowSummary: String
+        if !flow.hybridVTReady.isEmpty {
+            flowSummary = """
+                \(language.text("混合插帧阶段耗时 p50 / p95", "Hybrid Interpolation Timing p50 / p95"))
+                \(language.text("缩小参考图：", "Reference downscaling: "))\(values(flow.downscale))
+                \(language.text("VT 中点就绪：", "VT midpoint ready: "))\(values(flow.hybridVTReady))
+                \(language.text("后向运动估计（并发）：", "Backward ME (concurrent): "))\(values(flow.hybridMotionBackward))
+                \(language.text("前向运动估计（并发）：", "Forward ME (concurrent): "))\(values(flow.hybridMotionForward))
+                \(language.text("等待运动场增量：", "Additional wait for ME: "))\(values(flow.hybridMotionWait))
+                \(language.text("合成 / 配方准备：", "Composition / recipe setup: "))\(values(flow.reconstruction))
 
-            """
+                """
+        } else if !flow.downscale.isEmpty {
+            flowSummary = """
+                \(language.text("光流阶段耗时 p50 / p95", "Optical Flow Timing p50 / p95"))
+                \(language.text("输入格式转换（执行时）：", "Input conversion (when used): "))\(values(flow.conversion))
+                \(language.text("缩小参考图：", "Reference downscaling: "))\(values(flow.downscale))
+                \(language.text("前向光流：", "Forward optical flow: "))\(values(flow.forward))
+                \(language.text("后向光流：", "Backward optical flow: "))\(values(flow.backward))
+                \(language.text("原尺寸重建：", "Native-resolution reconstruction: "))\(values(flow.reconstruction))
+
+                """
+        } else {
+            flowSummary = ""
+        }
         return """
             \(language.text("原始帧延迟 p50 / p95", "Original Frame Latency p50 / p95"))
             \(language.text("采集回调 → 实际呈现：", "Capture callback → presentation: "))\(values(statistics.presentationLatency))

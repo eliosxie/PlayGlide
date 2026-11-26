@@ -6,7 +6,8 @@ import Synchronization
 struct FrameTraceEvent: Sendable {
     static let csvHeader =
         "event,host,sequence,pts,window_sequence,window_pts,window_epoch,arrival,frame_id,generated,deadline,display_target,scheduler_time,"
-        + "flow_conversion_ms,flow_downscale_ms,flow_forward_ms,flow_backward_ms,flow_reconstruction_ms,history_reset_reason,discard_reason"
+        + "flow_conversion_ms,flow_downscale_ms,flow_forward_ms,flow_backward_ms,flow_reconstruction_ms,history_reset_reason,discard_reason,"
+        + "hybrid_vt_ready_ms,hybrid_me_backward_ms,hybrid_me_forward_ms,hybrid_me_wait_ms"
 
     enum Kind: String, Sendable {
         case capture, sample, inputOverwritten, content, duplicate, reset, historyReset, ready, discarded
@@ -65,6 +66,10 @@ struct FrameTraceEvent: Sendable {
             milliseconds(opticalFlowTiming?.forward), milliseconds(opticalFlowTiming?.backward),
             milliseconds(opticalFlowTiming?.reconstruction), string(historyResetReason?.rawValue),
             selectionTimedOut ? "selection_timeout" : "",
+            milliseconds(opticalFlowTiming?.hybrid?.vtReady),
+            milliseconds(opticalFlowTiming?.hybrid?.backwardMotion),
+            milliseconds(opticalFlowTiming?.hybrid?.forwardMotion),
+            milliseconds(opticalFlowTiming?.hybrid?.motionWait),
         ].joined(separator: ",")
     }
 }
@@ -250,6 +255,10 @@ struct OpticalFlowLatencies: Sendable {
     var forward = PresentationLatency()
     var backward = PresentationLatency()
     var reconstruction = PresentationLatency()
+    var hybridVTReady = PresentationLatency()
+    var hybridMotionBackward = PresentationLatency()
+    var hybridMotionForward = PresentationLatency()
+    var hybridMotionWait = PresentationLatency()
 
     mutating func record(_ timing: OpticalFlowTiming) {
         if let conversionTime = timing.conversion { conversion.record(seconds: conversionTime) }
@@ -257,6 +266,12 @@ struct OpticalFlowLatencies: Sendable {
         forward.record(seconds: timing.forward)
         backward.record(seconds: timing.backward)
         reconstruction.record(seconds: timing.reconstruction)
+        if let hybrid = timing.hybrid {
+            hybridVTReady.record(seconds: hybrid.vtReady)
+            if let meBack = hybrid.backwardMotion { hybridMotionBackward.record(seconds: meBack) }
+            if let meFwd = hybrid.forwardMotion { hybridMotionForward.record(seconds: meFwd) }
+            hybridMotionWait.record(seconds: hybrid.motionWait)
+        }
     }
 }
 
