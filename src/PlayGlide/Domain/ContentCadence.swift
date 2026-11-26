@@ -691,16 +691,20 @@ struct FrameTimeline: Sendable {
         return true
     }
 
-    /// Waiting only helps when no frame is queued yet (or the head is near/past due). If the earliest
-    /// queued live frame is already scheduled for a future refresh, waiting on this refresh cannot make
-    /// an earlier frame due and only risks overshooting `targetTimestamp`.
-    func shouldWaitForReadyFrame(at time: Double, refreshInterval: Double? = nil) -> Bool {
+    /// Waiting only helps when no frame is queued yet (or the head is a late frame that a fresher
+    /// original could still overtake). When `wakeHalfSlot` is enabled, a fresh frame in the half-slot
+    /// selection window `(time, time + tolerance]` is already eligible for this refresh and cannot be
+    /// overtaken under monotonic deadlines, so waiting ends immediately.
+    func shouldWaitForReadyFrame(
+        at time: Double, refreshInterval: Double? = nil, wakeHalfSlot: Bool = false
+    ) -> Bool {
         guard let first = items.first else { return true }
         guard first.live else { return false }
         if hasStableDueFrame(at: time) { return false }
         let refresh = refreshInterval.flatMap { $0.isFinite && $0 > 0 && $0 <= 0.1 ? $0 : nil }
         let tolerance = min(first.latenessAllowance, refresh ?? first.latenessAllowance) / 2
         if defersEarlyHalfSlot(first, at: time, refresh: refresh, tolerance: tolerance) { return false }
+        if wakeHalfSlot && first.time > time && first.time <= time + tolerance { return false }
         return first.time <= time + tolerance
     }
 

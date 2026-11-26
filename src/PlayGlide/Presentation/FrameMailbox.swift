@@ -426,6 +426,11 @@ final class FrameMailbox: Sendable {
     static var fastPathEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_MAILBOX_FAST_PATH"] != "0"
     }
+    /// Wake late-selection waits as soon as a half-slot eligible or future-refresh frame arrives
+    /// (`PLAYGLIDE_WAKE_HALF_SLOT=1` opts in pending real-capture ABBA validation).
+    static var wakeHalfSlotEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_WAKE_HALF_SLOT"] == "1"
+    }
 
     struct PreviewSubmission {
         let attempt: FramePresentationStatus.Attempt?
@@ -433,6 +438,7 @@ final class FrameMailbox: Sendable {
 
     private struct PreviewWait: Sendable {
         let time: Double
+        let refreshInterval: Double?
         let semaphore = DispatchSemaphore(value: 0)
     }
 
@@ -505,16 +511,19 @@ final class FrameMailbox: Sendable {
     private let audioControlState = Mutex(AudioPlaybackControls())
     private let traceEnabled: Bool
     private let presentationRunLimit: Int?
+    private let wakeHalfSlot: Bool
 
     init(
         traceEnabled: Bool = BuildFeatures.developmentTools
             && ProcessInfo.processInfo.environment["PLAYGLIDE_FRAME_TRACE"] == "1",
         presentationRunLimit: Int? = BuildFeatures.developmentTools
             && ProcessInfo.processInfo.environment["PLAYGLIDE_PRESENTATION_RUN"] == "1"
-            ? PresentationRun.capacity : nil
+            ? PresentationRun.capacity : nil,
+        wakeHalfSlot: Bool = FrameMailbox.wakeHalfSlotEnabled
     ) {
         self.traceEnabled = traceEnabled
         self.presentationRunLimit = presentationRunLimit
+        self.wakeHalfSlot = wakeHalfSlot
     }
 
     func frameTrace(_ generation: UUID) -> [FrameTraceEvent] {
@@ -790,8 +799,15 @@ final class FrameMailbox: Sendable {
             $0.statistics.generatedFlushed += $0.timeline.generatedFlushed
             $0.statistics.realSuperseded += $0.timeline.supersededReal
             $0.timeline.clearDropCounters()
-            if let previewWait = $0.previewWait, $0.timeline.hasStableDueFrame(at: previewWait.time) {
-                $0.wakePreview()
+            if let previewWait = $0.previewWait {
+                let shouldWake =
+                    wakeHalfSlot
+                    ? !$0.timeline.shouldWaitForReadyFrame(
+                        at: previewWait.time, refreshInterval: previewWait.refreshInterval, wakeHalfSlot: true)
+                    : $0.timeline.hasStableDueFrame(at: previewWait.time)
+                if shouldWake {
+                    $0.wakePreview()
+                }
             }
         }
     }
@@ -802,12 +818,13 @@ final class FrameMailbox: Sendable {
     ) -> UUID? {
         let (generation, wait) = state.withLock { (state) -> (UUID?, PreviewWait?) in
             guard state.accepting else { return (nil, nil) }
-            if !state.timeline.shouldWaitForReadyFrame(at: time, refreshInterval: refreshInterval)
+            if !state.timeline.shouldWaitForReadyFrame(
+                at: time, refreshInterval: refreshInterval, wakeHalfSlot: wakeHalfSlot)
                 || state.previewWait != nil || DispatchTime.now() >= deadline
             {
                 return (state.generation, nil)
             }
-            let wait = PreviewWait(time: time)
+            let wait = PreviewWait(time: time, refreshInterval: refreshInterval)
             state.previewWait = wait
             return (state.generation, wait)
         }
