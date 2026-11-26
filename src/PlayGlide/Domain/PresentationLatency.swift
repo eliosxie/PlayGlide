@@ -352,7 +352,8 @@ struct CaptureClock: Sendable {
 
 struct DrawableSelectionBudget {
     /// Include completed Metal GPU execution duration in the late-selection submission budget
-    /// (`PLAYGLIDE_BUDGET_GPU_TIME=1` opts in pending real-capture ABBA validation).
+    /// (`PLAYGLIDE_BUDGET_GPU_TIME=1` remains opt-in: real PS5 4K@59.94 HDR10 ABBA showed adding GPU time
+    /// onto `CAMetalDisplayLink.targetTimestamp` shrinks late-selection wait and regresses `interval p99`).
     static var budgetGPUTimeEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_BUDGET_GPU_TIME"] == "1"
     }

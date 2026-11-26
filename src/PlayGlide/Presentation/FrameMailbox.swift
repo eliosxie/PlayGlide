@@ -427,9 +427,9 @@ final class FrameMailbox: Sendable {
         ProcessInfo.processInfo.environment["PLAYGLIDE_MAILBOX_FAST_PATH"] != "0"
     }
     /// Wake late-selection waits as soon as a half-slot eligible or future-refresh frame arrives
-    /// (`PLAYGLIDE_WAKE_HALF_SLOT=1` opts in pending real-capture ABBA validation).
+    /// (`PLAYGLIDE_WAKE_HALF_SLOT=0` restores legacy deadline-only wakeups).
     static var wakeHalfSlotEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_WAKE_HALF_SLOT"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_WAKE_HALF_SLOT"] != "0"
     }
 
     struct PreviewSubmission {
