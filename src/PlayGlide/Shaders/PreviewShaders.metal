@@ -523,6 +523,9 @@ fragment half4 previewHybridFragment(
     uint qualityFlags = uint(u.weights.w + 0.5f);
     bool edgeRefine = (qualityFlags & 1u) != 0u;
     bool hudDehalo = (qualityFlags & 4u) != 0u;
+    bool spatialMovingDetail = (qualityFlags & 8u) != 0u && previewHasMotion;
+    half pairedConfidence = spatialMovingDetail
+        ? smoothstep(half(0.05), half(0.45), min(md.z, md.w)) : half(0.0);
     bool windowAA = u.split.w > 0.5f && src.fitMax.z > 0.0f;
     float srcPixelsPerOutPixel = windowAA ? (float(aTex.get_width()) * src.fitMax.z * 4.0f) : 1.0f;
     half detailScale = windowAA ? half(smoothstep(2.0f, 1.0f, srcPixelsPerOutPixel)) : half(1.0);
@@ -545,7 +548,7 @@ fragment half4 previewHybridFragment(
             dB = dY + half(1.8556) * dCbCr.x;
         }
         staticW = smoothstep(half(0.022), half(0.011), sqrt(dR * dR + dG * dG + dB * dB));
-        if (staticW >= half(0.999)) {
+        if (staticW >= half(0.999) && pairedConfidence == half(0.0)) {
             half yStatic = previewNv12Luma(mix(yA, yB, tHalf));
             half2 cbcrStatic = fma(mix(caUV, cbUV, tHalf), half(255.0 / 224.0), half(-128.0 / 224.0));
             half3 rgb = finalizePreviewColor(decodeYCbCr(yStatic, cbcrStatic, bt2020, softToe), colorMode);
@@ -570,10 +573,12 @@ fragment half4 previewHybridFragment(
     }
     half2 midUV = lowMidChroma.sample(previewSampler, uv).rg;
     half y = midY;
+    half alignedY = midY;
+    half alignedWeight = half(0.0);
     half2 outChroma = midUV;
     bool appliedMotion = false;
     if (previewHasMotion && detailScale > half(0.01)) {
-        if (edgeRefine) {
+        if (edgeRefine && (!spatialMovingDetail || pairedConfidence == half(0.0))) {
             float2 mdSize = float2(motionDetail.get_width(), motionDetail.get_height());
             float2 mdPos = uv * mdSize;
             float2 mdCenter = floor(mdPos - 0.5f) + 0.5f;
@@ -600,6 +605,9 @@ fragment half4 previewHybridFragment(
                 md = motionDetail.sample(previewNearestSampler, bestUV);
                 if (md.z >= half(1.5)) md.z -= half(2.0);
             }
+        }
+        if (spatialMovingDetail) {
+            pairedConfidence = smoothstep(half(0.05), half(0.45), min(md.z, md.w));
         }
         half wA = md.z;
         half wB = md.w;
@@ -645,6 +653,16 @@ fragment half4 previewHybridFragment(
             half envMinY = min(midY, min(wA > half(0.1) ? srcAY : midY, wB > half(0.1) ? srcBY : midY));
             half envMaxY = max(midY, max(wA > half(0.1) ? srcAY : midY, wB > half(0.1) ? srcBY : midY));
             y = clamp(baseY + conf * detailY, envMinY, envMaxY);
+            if (pairedConfidence > half(0.0)) {
+                half agrees = half(1.0) - smoothstep(half(0.012), half(0.045), abs(srcAY - srcBY));
+                alignedWeight = pairedConfidence * agrees * detailScale;
+                alignedY = mix(srcAY, srcBY, tHalf);
+                if (staticW > half(0.0)) {
+                    half originalY = saturate(previewNv12Luma(mix(yA, yB, tHalf)));
+                    half movement = clamp(sign(alignedY - originalY) * (midY - originalY), half(0.0), half(1.0));
+                    staticW *= half(1.0) - alignedWeight * smoothstep(half(0.025), half(0.10), movement);
+                }
+            }
             half2 detailUV = (hiAUV * wa + hiBUV * wb) * invWAB;
             half2 uvMin = min(midUV, min(wA > half(0.1) ? srcAUV : midUV, wB > half(0.1) ? srcBUV : midUV));
             half2 uvMax = max(midUV, max(wA > half(0.1) ? srcAUV : midUV, wB > half(0.1) ? srcBUV : midUV));
@@ -688,6 +706,9 @@ fragment half4 previewHybridFragment(
         half amp = clamp(min(mn, half(1.0) - mx) / max(mx, half(1e-4)), half(0.0), half(1.0));
         half kCas = -casStrength * sqrt(amp);
         y = clamp((y + kCas * (n + so + e + w)) / (half(1.0) + half(4.0) * kCas), mn, mx);
+    }
+    if (alignedWeight > half(0.001)) {
+        y = mix(y, alignedY, alignedWeight);
     }
     if (staticW > half(0.001)) {
         y = mix(y, saturate(previewNv12Luma(mix(yA, yB, tHalf))), staticW);
