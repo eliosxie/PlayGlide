@@ -618,7 +618,9 @@ actor FrameProcessor: VideoProcessingStage {
                     }
                     let pixel: CVReadOnlyPixelBuffer
                     if deferredRecipe != nil {
-                        pixel = previous.pixelBuffer
+                        pixel =
+                            HybridInterpolator.deferredFallbackMidpointEnabled
+                            ? next.frame : previous.pixelBuffer
                     } else {
                         pixel = try hybrid.compose(
                             previous: previous, current: current, previousLow: previousLow, currentLow: currentLow,

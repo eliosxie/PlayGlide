@@ -292,6 +292,8 @@ struct PipelineStatistics: Sendable {
     var renderMilliseconds: Double = 0
     var previewFullRenders = 0
     var previewCacheHits = 0
+    var deferredHybridFallbacks = 0
+    var deferredHybridFallbackFailures = 0
     var displayInterval: Double = 0
     var displayLead: Double = 0
     var historyResetReasons: [HistoryResetReason: Int] = [:]

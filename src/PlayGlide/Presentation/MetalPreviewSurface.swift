@@ -9,6 +9,8 @@ import QuartzCore
 import SwiftUI
 import Synchronization
 
+struct DeferredHybridUnavailableError: Error {}
+
 /// Fit the complete window content to the actual drawable, removing only padding
 /// added by the capture canvas. Browser controls and source-owned black bars remain content.
 func fittedPreviewImage(_ image: CIImage, inputSize: VideoSize, contentRect: CGRect?, bounds: CGRect) -> CIImage {
@@ -132,6 +134,10 @@ final class PreviewImageRenderer {
     private(set) var originalRenders = 0
     private(set) var originalCacheHits = 0
     private(set) var spatialUpscales = 0
+    private(set) var deferredHybridFallbacks = 0
+    private(set) var deferredHybridFallbackFailures = 0
+    /// Test hook to inject CVMetalTexture mapping failures without altering production behavior.
+    var failTextureMapping: ((CVPixelBuffer, Int) -> Bool)?
     /// The frame whose MetalFX output is still in the upscaler's output texture.
     private var spatialKey: Key?
     private var reusedSpatialOutput = false
@@ -196,6 +202,21 @@ final class PreviewImageRenderer {
                 directRenders += 1
                 if reusedSpatialOutput { cacheHits += 1 } else { fullRenders += 1 }
                 return reusedSpatialOutput
+            }
+            if HybridInterpolator.deferredFallbackMidpointEnabled {
+                if try encodeDeferredHybridFallback(
+                    frame, recipe: recipe, compare: compare, pqOutput: pqOutput, to: destination, size: size,
+                    command: command)
+                {
+                    key = nil
+                    writer = nil
+                    deferredHybridFallbacks += 1
+                    directRenders += 1
+                    if reusedSpatialOutput { cacheHits += 1 } else { fullRenders += 1 }
+                    return reusedSpatialOutput
+                }
+                deferredHybridFallbackFailures += 1
+                throw DeferredHybridUnavailableError()
             }
         }
         let downsampling = requiresCoreImageDownsampling(frame, compare: compare, output: size)
@@ -322,13 +343,41 @@ final class PreviewImageRenderer {
         return false
     }
 
+    private func encodeDeferredHybridFallback(
+        _ frame: PresentationFrame, recipe: HybridPreviewRecipe, compare: Bool, pqOutput: Bool,
+        to destination: any MTLTexture, size: VideoSize, command: any MTLCommandBuffer
+    ) throws -> Bool {
+        let scaledRect: CGRect?
+        if let rect = frame.video.contentRect, recipe.inputSize.width > 0, recipe.inputSize.height > 0 {
+            let scaleX = CGFloat(recipe.lowSize.width) / CGFloat(recipe.inputSize.width)
+            let scaleY = CGFloat(recipe.lowSize.height) / CGFloat(recipe.inputSize.height)
+            scaledRect = CGRect(
+                x: rect.minX * scaleX, y: rect.minY * scaleY,
+                width: rect.width * scaleX, height: rect.height * scaleY)
+        } else {
+            scaledRect = nil
+        }
+        let midpointVideo = VideoFrame(
+            pixelBuffer: recipe.midpoint, presentationTime: frame.video.presentationTime,
+            duration: frame.video.duration, sequence: frame.video.sequence, arrivalTime: frame.video.arrivalTime,
+            contentRect: scaledRect, windowStamp: frame.video.windowStamp)
+        let fallbackFrame = PresentationFrame(
+            generation: frame.generation, video: midpointVideo, original: frame.original, generated: frame.generated,
+            outputSize: frame.outputSize, spatial: frame.spatial, presentationDelay: frame.presentationDelay,
+            displayIntervalHint: frame.displayIntervalHint, readyTime: frame.readyTime, timing: frame.timing,
+            timelineRevision: frame.timelineRevision)
+        return try encodeDirectMetal(
+            fallbackFrame, compare: compare, pqOutput: pqOutput, hdr10Override: recipe.isHDR10PQ,
+            to: destination, size: size, command: command)
+    }
+
     private func encodeDirectMetal(
-        _ frame: PresentationFrame, compare: Bool, pqOutput: Bool, to destination: any MTLTexture, size: VideoSize,
-        command: any MTLCommandBuffer
+        _ frame: PresentationFrame, compare: Bool, pqOutput: Bool, hdr10Override: Bool? = nil,
+        to destination: any MTLTexture, size: VideoSize, command: any MTLCommandBuffer
     ) throws -> Bool {
         reusedSpatialOutput = false
         guard let pipeline = try renderPipeline(for: destination.pixelFormat) else { return false }
-        guard let rawVideo = metalSource(for: frame.video) else { return false }
+        guard let rawVideo = metalSource(for: frame.video, hdr10Override: hdr10Override) else { return false }
         let originalSource: MetalSource?
         if compare {
             guard let mappedOriginal = metalSource(for: frame.original) else { return false }
@@ -389,7 +438,7 @@ final class PreviewImageRenderer {
         return true
     }
 
-    private func metalSource(for frame: VideoFrame) -> MetalSource? {
+    private func metalSource(for frame: VideoFrame, hdr10Override: Bool? = nil) -> MetalSource? {
         guard let textureCache else { return nil }
         var result: MetalSource?
         frame.pixelBuffer.withUnsafeBuffer { pixel in
@@ -397,7 +446,7 @@ final class PreviewImageRenderer {
             let pixelFormat = CVPixelBufferGetPixelFormatType(pixel)
             if pixelFormat == kCVPixelFormatType_32BGRA {
                 let needsRec709: Bool
-                let isHDR10 = PixelConverter.isHDR10PQ(pixel)
+                let isHDR10 = hdr10Override ?? PixelConverter.isHDR10PQ(pixel)
                 if isHDR10 {
                     needsRec709 = false
                 } else if let colorSpace = CVBufferCopyAttachment(pixel, kCVImageBufferCGColorSpaceKey, nil) {
@@ -431,7 +480,7 @@ final class PreviewImageRenderer {
                     primary: tex, chroma: nil, views: [view], size: frame.size, contentRect: frame.contentRect,
                     isNV12: false, needsRec709ToSRGB: needsRec709, isHDR10PQ: isHDR10)
             } else if pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
-                let isHDR10 = PixelConverter.isHDR10PQ(pixel)
+                let isHDR10 = hdr10Override ?? PixelConverter.isHDR10PQ(pixel)
                 let matrix = CVBufferCopyAttachment(pixel, kCVImageBufferYCbCrMatrixKey, nil) as? String
                 let validColor: Bool
                 if isHDR10 {
@@ -482,6 +531,7 @@ final class PreviewImageRenderer {
     private func mapTexture(
         _ pixel: CVPixelBuffer, cache: CVMetalTextureCache, format: MTLPixelFormat, width: Int, height: Int, plane: Int
     ) -> CVMetalTexture? {
+        if failTextureMapping?(pixel, plane) == true { return nil }
         var view: CVMetalTexture?
         let attributes = [kCVMetalTextureUsage as String: MTLTextureUsage.shaderRead.rawValue] as CFDictionary
         guard
@@ -617,7 +667,7 @@ final class PreviewImageRenderer {
         guard let spatial else {
             throw PipelineError(AppText("Spatial 资源不可用", "MetalFX Spatial resources are unavailable."))
         }
-        let resources = try spatial.prepare(input: frame.video.size, output: frame.outputSize)
+        let resources = try spatial.prepare(input: recipe.inputSize, output: frame.outputSize)
         let spatialNext = Key(
             frame: frame.id, generation: frame.generation, compare: false, size: frame.outputSize,
             format: resources.output.pixelFormat.rawValue)
@@ -627,7 +677,7 @@ final class PreviewImageRenderer {
             guard
                 try encodeDeferredHybrid(
                     frame, recipe: recipe, compare: false, pqOutput: false, to: resources.input,
-                    size: frame.video.size, ignoreContentRect: true, command: command)
+                    size: recipe.inputSize, ignoreContentRect: true, command: command)
             else { return false }
             resources.scaler.encode(commandBuffer: command)
             spatialKey = spatialNext
@@ -635,8 +685,8 @@ final class PreviewImageRenderer {
         }
         let scaledContent: CGRect?
         if let rect = frame.video.contentRect {
-            let scaleX = CGFloat(frame.outputSize.width) / CGFloat(frame.video.size.width)
-            let scaleY = CGFloat(frame.outputSize.height) / CGFloat(frame.video.size.height)
+            let scaleX = CGFloat(frame.outputSize.width) / CGFloat(recipe.inputSize.width)
+            let scaleY = CGFloat(frame.outputSize.height) / CGFloat(recipe.inputSize.height)
             scaledContent = CGRect(
                 x: rect.minX * scaleX, y: rect.minY * scaleY,
                 width: rect.width * scaleX, height: rect.height * scaleY)
@@ -2439,8 +2489,13 @@ private final class PreviewRenderer: NSObject, CAMetalDisplayLinkDelegate {
             return
         }
         do {
+            let fallbacksBefore = imageRenderer.deferredHybridFallbacks
             let reused = try imageRenderer.encode(
                 frame, compare: compare, pqOutput: wantsPQ, to: texture, command: command)
+            let fallbackDelta = imageRenderer.deferredHybridFallbacks - fallbacksBefore
+            if fallbackDelta > 0 {
+                mailbox.mutate(frame.generation) { $0.deferredHybridFallbacks += fallbackDelta }
+            }
             let mailbox = mailbox
             let submittedAt = mediaHostTime()
             guard
@@ -2491,6 +2546,13 @@ private final class PreviewRenderer: NSObject, CAMetalDisplayLinkDelegate {
             if lateSelection {
                 selectionBudget.recordEncoding(seconds: mediaHostTime() - callbackTime)
             }
+        } catch is DeferredHybridUnavailableError {
+            lastRenderedState = nil
+            mailbox.mutate(frame.generation) {
+                $0.deferredHybridFallbackFailures += 1
+                $0.unpresented += 1
+            }
+            mailbox.releaseGPU()
         } catch {
             let mailbox = mailbox
             lastRenderedState = nil

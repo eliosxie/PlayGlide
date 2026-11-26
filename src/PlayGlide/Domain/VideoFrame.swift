@@ -42,6 +42,7 @@ struct HybridPreviewRecipe: Sendable {
     let phase: Float
     let sharpenStrength: Float
     let restoresStaticPixels: Bool
+    let inputSize: VideoSize
     let lowSize: VideoSize
     let motionSize: VideoSize
     let forwardMotionSize: VideoSize

@@ -71,6 +71,11 @@ final class HybridInterpolator {
     static var spatialDeferredComposeEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_SPATIAL_DEFERRED_COMPOSE"] == "1"
     }
+    /// Fallback to the ready VT midpoint instead of holding the previous original frame if deferred hybrid
+    /// texture mapping fails (`PLAYGLIDE_DEFERRED_FALLBACK_MIDPOINT=0` restores previous-frame placeholder).
+    static var deferredFallbackMidpointEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_DEFERRED_FALLBACK_MIDPOINT"] != "0"
+    }
     static let spatialMovingDetailEnabled =
         ProcessInfo.processInfo.environment["PLAYGLIDE_SPATIAL_MOVING_DETAIL"] == "1"
 
@@ -586,8 +591,8 @@ final class HybridInterpolator {
             motionBackward: motionField?.backward, motionForward: motionField?.forward,
             phase: phase, sharpenStrength: sharpenStrength ?? detailMode.sharpenStrength,
             restoresStaticPixels: restoresStaticPixels,
-            lowSize: low, motionSize: motionSize, forwardMotionSize: forwardMotionSize, selectSize: selectSize,
-            isHDR10PQ: prevCheck.hdr10)
+            inputSize: input, lowSize: low, motionSize: motionSize, forwardMotionSize: forwardMotionSize,
+            selectSize: selectSize, isHDR10PQ: prevCheck.hdr10)
     }
 
     /// Upscales VT's midpoint, restores unchanged source pixels, and optionally transfers native high-frequency
