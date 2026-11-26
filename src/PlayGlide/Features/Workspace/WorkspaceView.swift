@@ -268,8 +268,8 @@ private struct PreviewPanel: View {
                 mailbox: model.mailbox, active: model.active,
                 outputFrameDuration: model.statistics.outputFrameDuration,
                 presentationMode: (model.applied ?? model.draft).presentationMode,
-                prefersLateSelection: model.applied?.interpolation == .double
-                    && PreviewLateSelection.configured.applies(to: model.statistics.inputSize),
+                prefersLateSelection: PreviewDisplayTiming.prefersLateSelection(
+                    for: model.applied?.interpolation, inputSize: model.statistics.inputSize),
                 immersive: model.immersive,
                 roundedCorners: !model.previewOnly,
                 hdr10Active: model.effectiveHDR10Active,

@@ -640,6 +640,13 @@ private final class CaptureAudioDelegate: NSObject, AVCaptureAudioDataOutputSamp
 /// The lock owns all mutable audio state. Only app-owned, read-only PCM enters the queue.
 /// A bounded timer feeds up to 80 ms ahead plus one packet; backpressure cannot grow a task queue.
 final class CaptureAudioMonitor: Sendable {
+    /// Pump newly received capture audio packets immediately under the same lock instead of waiting
+    /// up to 5 ms for the periodic timer (`PLAYGLIDE_AUDIO_IMMEDIATE_PUMP=1` or `PLAYGLIDE_FAST_PASSTHROUGH=1`).
+    static var immediatePumpEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_AUDIO_IMMEDIATE_PUMP"] == "1"
+            || PresentationMode.fastPassthroughEnabled
+    }
+
     private struct PCM: Sendable {
         let data: CMReadOnlyDataBlockBuffer
         let format: CMFormatDescription
@@ -694,6 +701,7 @@ final class CaptureAudioMonitor: Sendable {
     private let makePlayback: @Sendable () -> any CaptureAudioPlayback
     private let resolveOutputDevice: @Sendable (String) -> String?
     private let hostTime: @Sendable () -> Double
+    private let immediatePump: Bool
 
     init(
         mailbox: FrameMailbox, generation: UUID,
@@ -703,6 +711,7 @@ final class CaptureAudioMonitor: Sendable {
                 requested: requested, available: CaptureCatalog.availableAudioOutputDevices())
         },
         hostTime: @escaping @Sendable () -> Double = { mediaHostTime() },
+        immediatePump: Bool = CaptureAudioMonitor.immediatePumpEnabled,
         failure: @escaping @Sendable (AppText) -> Void
     ) {
         self.mailbox = mailbox
@@ -711,6 +720,7 @@ final class CaptureAudioMonitor: Sendable {
         self.makePlayback = makePlayback
         self.resolveOutputDevice = resolveOutputDevice
         self.hostTime = hostTime
+        self.immediatePump = immediatePump
     }
 
     func start(on queue: DispatchQueue? = nil) {
@@ -747,6 +757,7 @@ final class CaptureAudioMonitor: Sendable {
     }
 
     func receive(_ buffer: CMSampleBuffer) {
+        let controls = immediatePump ? mailbox.audioControls() : nil
         state.withLock {
             guard $0.active else { return }
             guard CMSampleBufferDataIsReady(buffer),
@@ -809,6 +820,9 @@ final class CaptureAudioMonitor: Sendable {
                     "\(Int(audio.mSampleRate)) Hz · \(audio.mChannelsPerFrame) 声道 PCM",
                     "\(Int(audio.mSampleRate)) Hz · \(audio.mChannelsPerFrame)-channel PCM")
             }
+            if let controls {
+                pumpLocked(&$0, controls: controls)
+            }
         }
     }
 
@@ -828,181 +842,187 @@ final class CaptureAudioMonitor: Sendable {
     func pump() {
         let controls = mailbox.audioControls()
         state.withLock {
-            guard $0.active, var output = $0.playback else { return }
-            let now = hostTime()
-            let gain = (volume: controls.clampedVolume, muted: controls.muted)
-            if $0.appliedGain?.volume != gain.volume || $0.appliedGain?.muted != gain.muted {
-                output.setGain(volume: gain.volume, muted: gain.muted)
-                $0.appliedGain = gain
+            pumpLocked(&$0, controls: controls)
+        }
+    }
+
+    private func pumpLocked(_ state: inout State, controls: AudioPlaybackControls) {
+        guard state.active, var output = state.playback else { return }
+        let now = hostTime()
+        let gain = (volume: controls.clampedVolume, muted: controls.muted)
+        if state.appliedGain?.volume != gain.volume || state.appliedGain?.muted != gain.muted {
+            output.setGain(volume: gain.volume, muted: gain.muted)
+            state.appliedGain = gain
+        }
+        let requestedOutput = controls.normalizedOutputDeviceID
+        let flushed = output.consumeAutomaticFlush()
+        let shouldCheckRoute =
+            flushed || state.appliedOutputRequested != requestedOutput
+            || (!requestedOutput.isEmpty && now - state.lastOutputRouteCheck >= 1.0)
+        if shouldCheckRoute {
+            let resolvedOutput = resolveOutputDevice(requestedOutput)
+            let routeChanged = resolvedOutput != state.appliedOutputUID
+            state.appliedOutputRequested = requestedOutput
+            state.lastOutputRouteCheck = now
+            if routeChanged {
+                output.setOutputDevice(uniqueID: resolvedOutput)
+                state.appliedOutputUID = resolvedOutput
             }
-            let requestedOutput = controls.normalizedOutputDeviceID
-            let flushed = output.consumeAutomaticFlush()
-            let shouldCheckRoute =
-                flushed || $0.appliedOutputRequested != requestedOutput
-                || (!requestedOutput.isEmpty && now - $0.lastOutputRouteCheck >= 1.0)
-            if shouldCheckRoute {
-                let resolvedOutput = resolveOutputDevice(requestedOutput)
-                let routeChanged = resolvedOutput != $0.appliedOutputUID
-                $0.appliedOutputRequested = requestedOutput
-                $0.lastOutputRouteCheck = now
-                if routeChanged {
-                    output.setOutputDevice(uniqueID: resolvedOutput)
-                    $0.appliedOutputUID = resolvedOutput
-                }
-                if flushed || (routeChanged && $0.controller.rate > 0) {
-                    resetPlayback(&$0, clearBuffers: false)
-                }
+            if flushed || (routeChanged && state.controller.rate > 0) {
+                resetPlayback(&state, clearBuffers: false)
             }
-            if let error = output.failure {
-                if $0.appliedOutputUID != nil {
-                    // Dedicated output device failed or unplugged: recreate playback on system default.
-                    resetPlayback(&$0, clearBuffers: false)
-                    let fallback = makePlayback()
-                    fallback.setOutputDevice(uniqueID: nil)
-                    fallback.setGain(volume: gain.volume, muted: gain.muted)
-                    $0.playback = fallback
-                    $0.appliedOutputUID = nil
-                    $0.lastOutputRouteCheck = now
-                    output = fallback
-                } else {
-                    fail(AppText("音频播放失败：\(error.chinese)", "Audio playback failed: \(error.english)"), state: &$0)
-                    return
-                }
-            }
-            let anchor = now - $0.lastReceived <= 0.25 ? mailbox.audioReference(generation, now: now) : nil
-            let offsetSeconds = controls.offsetSeconds
-            let offsetTime = CMTime(seconds: offsetSeconds, preferredTimescale: 1_000_000_000)
-            // Require a covered start point when aligning. Steady playback can use already enqueued PCM.
-            let buffers = $0.buffers
-            let playback = output.currentTime
-            // A proposed alignment becomes the active clock only after playback is scheduled.
-            var controller = $0.controller
-            let action = controller.update(
-                anchor: anchor, playbackTime: playback, now: now, offsetSeconds: offsetSeconds,
-                canAlign: anchor.map {
-                    buffers.contains(CMTimeSubtract($0.mediaTime(at: now + AudioSyncController.startLead), offsetTime))
-                } ?? false)
-            var alignment: (CMTime, Double)?
-            switch action {
-            case .pause:
-                resetPlayback(&$0, clearBuffers: false)
-            case .align(let time, let hostTime):
-                if $0.controller.rate > 0 { resetPlayback(&$0, clearBuffers: false) }
-                $0.nextSequence = $0.buffers.entries.first?.sequence ?? 0
-                alignment = (time, hostTime)
-            case .rate(let rate):
-                // Anchor rate slews to the current (media, host) pair; passing invalid times stalls
-                // AVSampleBufferRenderSynchronizer's timebase by ~21 ms per call on macOS (R8).
-                if playback.isNumeric {
-                    output.setRate(
-                        rate, time: playback,
-                        hostTime: CMTime(seconds: now, preferredTimescale: 1_000_000_000))
-                } else {
-                    output.setRate(rate, time: .invalid, hostTime: .invalid)
-                }
-            case .none: break
-            }
-            let fastPath = FrameMailbox.fastPathEnabled
-            guard let anchor, controller.rate > 0 else {
-                $0.controller = controller
-                if $0.alignmentWaitStartedAt != nil { finishAlignmentWait(&$0, at: now, failed: true) }
-                let telemetry = PublishedAudioTelemetry(
-                    status: AppText("等待音频与视频呈现", "Waiting for audio and video"), rate: 0, muted: controls.muted,
-                    volume: controls.clampedVolume, offsetMilliseconds: controls.clampedOffsetMilliseconds)
-                if !fastPath || $0.lastTelemetry != telemetry || $0.lastTelemetryError != nil
-                    || now - $0.lastTelemetryTime >= 0.05
-                {
-                    $0.lastTelemetry = telemetry
-                    $0.lastTelemetryError = nil
-                    $0.lastTelemetryTime = now
-                    mailbox.mutate(generation) {
-                        $0.audioStatus = telemetry.status
-                        $0.audioRate = telemetry.rate
-                        $0.audioSyncErrorMilliseconds = nil
-                        $0.audioMuted = telemetry.muted
-                        $0.audioVolume = telemetry.volume
-                        $0.audioOffsetMilliseconds = telemetry.offsetMilliseconds
-                    }
-                }
+        }
+        if let error = output.failure {
+            if state.appliedOutputUID != nil {
+                // Dedicated output device failed or unplugged: recreate playback on system default.
+                resetPlayback(&state, clearBuffers: false)
+                let fallback = makePlayback()
+                fallback.setOutputDevice(uniqueID: nil)
+                fallback.setGain(volume: gain.volume, muted: gain.muted)
+                state.playback = fallback
+                state.appliedOutputUID = nil
+                state.lastOutputRouteCheck = now
+                output = fallback
+            } else {
+                fail(
+                    AppText("音频播放失败：\(error.chinese)", "Audio playback failed: \(error.english)"),
+                    state: &state)
                 return
             }
-            let start = alignment?.0 ?? playback
-            let horizon = CMTimeSubtract(anchor.mediaTime(at: max(now, hostTime()) + 0.08), offsetTime)
-            var enqueuedCount = 0
-            for entry in $0.buffers.entries where entry.sequence >= $0.nextSequence {
-                if CMTimeCompare(entry.end, start) <= 0 {
-                    $0.nextSequence = entry.sequence + 1
-                    continue
-                }
-                guard CMTimeCompare(entry.time, horizon) <= 0, output.isReady else { break }
-                guard entry.payload.enqueue(to: output, at: entry.time) else {
-                    fail(
-                        AppText("无法构建采集卡音频播放缓冲", "Could not create the capture audio playback buffer."), state: &$0,
-                        aligning: alignment != nil)
-                    return
-                }
-                enqueuedCount += 1
-                $0.nextSequence = entry.sequence + 1
+        }
+        let anchor = now - state.lastReceived <= 0.25 ? mailbox.audioReference(generation, now: now) : nil
+        let offsetSeconds = controls.offsetSeconds
+        let offsetTime = CMTime(seconds: offsetSeconds, preferredTimescale: 1_000_000_000)
+        // Require a covered start point when aligning. Steady playback can use already enqueued PCM.
+        let buffers = state.buffers
+        let playback = output.currentTime
+        // A proposed alignment becomes the active clock only after playback is scheduled.
+        var controller = state.controller
+        let action = controller.update(
+            anchor: anchor, playbackTime: playback, now: now, offsetSeconds: offsetSeconds,
+            canAlign: anchor.map {
+                buffers.contains(CMTimeSubtract($0.mediaTime(at: now + AudioSyncController.startLead), offsetTime))
+            } ?? false)
+        var alignment: (CMTime, Double)?
+        switch action {
+        case .pause:
+            resetPlayback(&state, clearBuffers: false)
+        case .align(let time, let hostTime):
+            if state.controller.rate > 0 { resetPlayback(&state, clearBuffers: false) }
+            state.nextSequence = state.buffers.entries.first?.sequence ?? 0
+            alignment = (time, hostTime)
+        case .rate(let rate):
+            // Anchor rate slews to the current (media, host) pair; passing invalid times stalls
+            // AVSampleBufferRenderSynchronizer's timebase by ~21 ms per call on macOS (R8).
+            if playback.isNumeric {
+                output.setRate(
+                    rate, time: playback,
+                    hostTime: CMTime(seconds: now, preferredTimescale: 1_000_000_000))
+            } else {
+                output.setRate(rate, time: .invalid, hostTime: .invalid)
             }
-            if let (time, hostTime) = alignment {
-                guard enqueuedCount > 0 else {
-                    let started = $0.alignmentWaitStartedAt ?? now
-                    $0.alignmentWaitStartedAt = started
-                    let telemetry = PublishedAudioTelemetry(
-                        status: AppText("等待音频输出", "Waiting for audio output"), rate: 0, muted: controls.muted,
-                        volume: controls.clampedVolume, offsetMilliseconds: controls.clampedOffsetMilliseconds)
-                    $0.lastTelemetry = telemetry
-                    $0.lastTelemetryError = nil
-                    $0.lastTelemetryTime = now
-                    mailbox.mutate(generation) {
-                        $0.audioStatus = telemetry.status
-                        $0.audioRate = telemetry.rate
-                        $0.audioSyncErrorMilliseconds = nil
-                        $0.audioAlignmentWaitMilliseconds = (now - started) * 1000
-                        $0.audioMuted = telemetry.muted
-                        $0.audioVolume = telemetry.volume
-                        $0.audioOffsetMilliseconds = telemetry.offsetMilliseconds
-                    }
-                    return
-                }
-                if let error = output.failure {
-                    fail(
-                        AppText("音频播放失败：\(error.chinese)", "Audio playback failed: \(error.english)"), state: &$0,
-                        aligning: true)
-                    return
-                }
-                output.setRate(1, time: time, hostTime: CMTime(seconds: hostTime, preferredTimescale: 1_000_000_000))
-                finishAlignmentWait(&$0, at: now)
-            }
-            $0.controller = controller
-            let status =
-                controls.muted
-                ? AppText("按视频呈现同步播放（已静音）", "Synced to video (muted)") : AppText("按视频呈现同步播放", "Synced to video")
+        case .none: break
+        }
+        let fastPath = FrameMailbox.fastPathEnabled
+        guard let anchor, controller.rate > 0 else {
+            state.controller = controller
+            if state.alignmentWaitStartedAt != nil { finishAlignmentWait(&state, at: now, failed: true) }
             let telemetry = PublishedAudioTelemetry(
-                status: status, rate: controller.rate, muted: controls.muted,
+                status: AppText("等待音频与视频呈现", "Waiting for audio and video"), rate: 0, muted: controls.muted,
                 volume: controls.clampedVolume, offsetMilliseconds: controls.clampedOffsetMilliseconds)
-            let errorChanged: Bool
-            switch ($0.lastTelemetryError, controller.errorSeconds) {
-            case (nil, nil): errorChanged = false
-            case (let old?, let current?): errorChanged = abs(old - current) >= 0.0001
-            default: errorChanged = true
-            }
-            if !fastPath || enqueuedCount > 0 || alignment != nil || $0.lastTelemetry != telemetry
-                || errorChanged || now - $0.lastTelemetryTime >= 0.05
+            if !fastPath || state.lastTelemetry != telemetry || state.lastTelemetryError != nil
+                || now - state.lastTelemetryTime >= 0.05
             {
-                $0.lastTelemetry = telemetry
-                $0.lastTelemetryError = controller.errorSeconds
-                $0.lastTelemetryTime = now
+                state.lastTelemetry = telemetry
+                state.lastTelemetryError = nil
+                state.lastTelemetryTime = now
                 mailbox.mutate(generation) {
-                    if enqueuedCount > 0 { $0.audioEnqueued += enqueuedCount }
-                    if alignment != nil { $0.audioResyncs += 1 }
                     $0.audioStatus = telemetry.status
                     $0.audioRate = telemetry.rate
-                    $0.audioSyncErrorMilliseconds = controller.errorSeconds.map { $0 * 1000 }
+                    $0.audioSyncErrorMilliseconds = nil
                     $0.audioMuted = telemetry.muted
                     $0.audioVolume = telemetry.volume
                     $0.audioOffsetMilliseconds = telemetry.offsetMilliseconds
                 }
+            }
+            return
+        }
+        let start = alignment?.0 ?? playback
+        let horizon = CMTimeSubtract(anchor.mediaTime(at: max(now, hostTime()) + 0.08), offsetTime)
+        var enqueuedCount = 0
+        for entry in state.buffers.entries where entry.sequence >= state.nextSequence {
+            if CMTimeCompare(entry.end, start) <= 0 {
+                state.nextSequence = entry.sequence + 1
+                continue
+            }
+            guard CMTimeCompare(entry.time, horizon) <= 0, output.isReady else { break }
+            guard entry.payload.enqueue(to: output, at: entry.time) else {
+                fail(
+                    AppText("无法构建采集卡音频播放缓冲", "Could not create the capture audio playback buffer."),
+                    state: &state, aligning: alignment != nil)
+                return
+            }
+            enqueuedCount += 1
+            state.nextSequence = entry.sequence + 1
+        }
+        if let (time, hostTime) = alignment {
+            guard enqueuedCount > 0 else {
+                let started = state.alignmentWaitStartedAt ?? now
+                state.alignmentWaitStartedAt = started
+                let telemetry = PublishedAudioTelemetry(
+                    status: AppText("等待音频输出", "Waiting for audio output"), rate: 0, muted: controls.muted,
+                    volume: controls.clampedVolume, offsetMilliseconds: controls.clampedOffsetMilliseconds)
+                state.lastTelemetry = telemetry
+                state.lastTelemetryError = nil
+                state.lastTelemetryTime = now
+                mailbox.mutate(generation) {
+                    $0.audioStatus = telemetry.status
+                    $0.audioRate = telemetry.rate
+                    $0.audioSyncErrorMilliseconds = nil
+                    $0.audioAlignmentWaitMilliseconds = (now - started) * 1000
+                    $0.audioMuted = telemetry.muted
+                    $0.audioVolume = telemetry.volume
+                    $0.audioOffsetMilliseconds = telemetry.offsetMilliseconds
+                }
+                return
+            }
+            if let error = output.failure {
+                fail(
+                    AppText("音频播放失败：\(error.chinese)", "Audio playback failed: \(error.english)"),
+                    state: &state, aligning: true)
+                return
+            }
+            output.setRate(1, time: time, hostTime: CMTime(seconds: hostTime, preferredTimescale: 1_000_000_000))
+            finishAlignmentWait(&state, at: now)
+        }
+        state.controller = controller
+        let status =
+            controls.muted
+            ? AppText("按视频呈现同步播放（已静音）", "Synced to video (muted)") : AppText("按视频呈现同步播放", "Synced to video")
+        let telemetry = PublishedAudioTelemetry(
+            status: status, rate: controller.rate, muted: controls.muted,
+            volume: controls.clampedVolume, offsetMilliseconds: controls.clampedOffsetMilliseconds)
+        let errorChanged: Bool
+        switch (state.lastTelemetryError, controller.errorSeconds) {
+        case (nil, nil): errorChanged = false
+        case (let old?, let current?): errorChanged = abs(old - current) >= 0.0001
+        default: errorChanged = true
+        }
+        if !fastPath || enqueuedCount > 0 || alignment != nil || state.lastTelemetry != telemetry
+            || errorChanged || now - state.lastTelemetryTime >= 0.05
+        {
+            state.lastTelemetry = telemetry
+            state.lastTelemetryError = controller.errorSeconds
+            state.lastTelemetryTime = now
+            mailbox.mutate(generation) {
+                if enqueuedCount > 0 { $0.audioEnqueued += enqueuedCount }
+                if alignment != nil { $0.audioResyncs += 1 }
+                $0.audioStatus = telemetry.status
+                $0.audioRate = telemetry.rate
+                $0.audioSyncErrorMilliseconds = controller.errorSeconds.map { $0 * 1000 }
+                $0.audioMuted = telemetry.muted
+                $0.audioVolume = telemetry.volume
+                $0.audioOffsetMilliseconds = telemetry.offsetMilliseconds
             }
         }
     }

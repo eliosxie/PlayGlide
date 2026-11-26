@@ -198,14 +198,24 @@ struct SessionPreferences: Sendable, Equatable, Codable {
 }
 
 enum PresentationMode: String, CaseIterable, Identifiable, Sendable, Codable {
+    /// Lower 1× passthrough audio-video delay floor and enable late selection across 1×/4× modes
+    /// (`PLAYGLIDE_FAST_PASSTHROUGH=1` opts in pending real-capture ABBA validation).
+    static var fastPassthroughEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_FAST_PASSTHROUGH"] == "1"
+    }
+
     case responsive, steady
     var id: Self { self }
     var title: AppText { self == .responsive ? AppText("低延迟", "Low Latency") : AppText("平稳优先", "Steady Playback") }
     var bufferedFrames: Double { self == .responsive ? 1 : 2 }
     var audioVideoDelayFloor: Double { audioVideoDelayFloor(multiplier: 2) }
-    func audioVideoDelayFloor(multiplier: Int) -> Double {
+    func audioVideoDelayFloor(
+        multiplier: Int, fastPassthrough: Bool = PresentationMode.fastPassthroughEnabled
+    ) -> Double {
         guard self == .responsive else { return 0.08 }
-        return multiplier >= 4 ? 0.03 : 0.022
+        if multiplier >= 4 { return 0.03 }
+        if multiplier <= 1, fastPassthrough { return 0.008 }
+        return 0.022
     }
     func refreshRate(outputInterval: Double, maximumFPS: Float) -> Float {
         let maximum = maximumFPS.isFinite && maximumFPS >= 1 ? maximumFPS : 60
@@ -223,6 +233,14 @@ struct PreviewDisplayTiming: Sendable {
 
     var requestedFPS: Float { mode.refreshRate(outputInterval: outputInterval, maximumFPS: maximumFPS) }
     var lateSelection: Bool { prefersLateSelection && mode == .responsive && maximumFPS >= 120 }
+
+    static func prefersLateSelection(
+        for interpolation: InterpolationStrategy?, inputSize: VideoSize?,
+        fastPassthrough: Bool = PresentationMode.fastPassthroughEnabled
+    ) -> Bool {
+        guard let interpolation, PreviewLateSelection.configured.applies(to: inputSize) else { return false }
+        return fastPassthrough || interpolation == .double
+    }
 }
 
 enum WindowSamplingRate: String, CaseIterable, Identifiable, Sendable {
