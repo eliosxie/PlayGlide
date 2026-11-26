@@ -107,6 +107,11 @@ final class PreviewImageRenderer {
     static var hdr10SoftBlackToeEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_HDR10_SOFT_TOE"] != "0"
     }
+    /// Prewarm preview render and motion-selection Metal pipeline states off the display link callback
+    /// (`PLAYGLIDE_PREWARM_PIPELINES=1` opts in pending cold-start A/B comparison).
+    static var prewarmPipelinesEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_PREWARM_PIPELINES"] == "1"
+    }
 
     private let device: any MTLDevice
     private let context: CIContext
@@ -123,6 +128,7 @@ final class PreviewImageRenderer {
     private var hybridMotionDetailHasForward = false
     private(set) var selectMotionDispatches = 0
     private(set) var precomputedMotionUses = 0
+    private(set) var pipelineCreations = 0
     private var spatial: SpatialUpscaler?
     private var texture: (any MTLTexture)?
     private var key: Key?
@@ -906,6 +912,22 @@ final class PreviewImageRenderer {
         return true
     }
 
+    /// Pre-creates preview render and deferred-hybrid compute pipeline states off the display callback,
+    /// populating the existing caches so the first presented frame avoids synchronous pipeline compilation.
+    func prewarmPipelines(pixelFormats: [MTLPixelFormat] = [.bgr10a2Unorm, .bgra8Unorm]) {
+        var seen: Set<UInt> = []
+        for format in pixelFormats where seen.insert(format.rawValue).inserted {
+            _ = try? renderPipeline(for: format)
+            _ = try? hybridRenderPipeline(for: format, hasMotion: false)
+            _ = try? hybridRenderPipeline(for: format, hasMotion: true)
+        }
+        for hasForward in [false, true] {
+            for sampleMid in [false, true] {
+                _ = try? selectMotionPipeline(hasForwardMotion: hasForward, sampleMid: sampleMid)
+            }
+        }
+    }
+
     private func selectMotionPipeline(hasForwardMotion: Bool, sampleMid: Bool) throws -> (any MTLComputePipelineState)?
     {
         let key = SelectMotionKey(hasForwardMotion: hasForwardMotion, sampleMid: sampleMid)
@@ -921,6 +943,7 @@ final class PreviewImageRenderer {
         let function = try renderLibrary.makeFunction(name: "previewSelectMotion", constantValues: constants)
         let pipeline = try device.makeComputePipelineState(function: function)
         selectMotionPipelines[key] = pipeline
+        pipelineCreations += 1
         return pipeline
     }
 
@@ -946,6 +969,7 @@ final class PreviewImageRenderer {
         descriptor.colorAttachments[0].pixelFormat = pixelFormat
         let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         hybridRenderPipelines[key] = pipeline
+        pipelineCreations += 1
         return pipeline
     }
 
@@ -961,6 +985,7 @@ final class PreviewImageRenderer {
         descriptor.colorAttachments[0].pixelFormat = pixelFormat
         let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         renderPipelines[pixelFormat] = pipeline
+        pipelineCreations += 1
         return pipeline
     }
 
@@ -2350,6 +2375,9 @@ private final class PreviewRenderer: NSObject, CAMetalDisplayLinkDelegate {
         super.init()
     }
     func install() {
+        if PreviewImageRenderer.prewarmPipelinesEnabled {
+            imageRenderer?.prewarmPipelines(pixelFormats: [surface.layer.pixelFormat, .bgra8Unorm])
+        }
         let link = surface.link
         link.delegate = self
         link.preferredFrameLatency = 1
