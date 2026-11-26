@@ -10,6 +10,8 @@ PlayGlide turns your Mac into a display for your PlayStation, Xbox, or Nintendo 
 
 You'll need an **Apple silicon Mac running macOS 27 or later** and a **USB HDMI capture card recognized by macOS**.
 
+Developed and tested on a Mac with an M3 Max chip running macOS 27.
+
 1. Download the macOS arm64 **DMG** from [GitHub Releases](https://github.com/eliosxie/PlayGlide/releases). Open it and drag **PlayGlide.app** onto **Applications**. Current builds use an ad-hoc signature and have not been notarized by Apple, so macOS may block the first launch. [Apple’s guide to opening downloaded apps](https://support.apple.com/en-us/102445)
 2. Connect your console's HDMI output to the card's HDMI input, then plug the card into your Mac over USB. Capture requires an HDMI signal without HDCP copy protection.
 3. Open PlayGlide, select the card and capture format, and click **Start Capture**. Allow camera access for video. For game audio, enable **Play and Sync Capture Audio** and allow microphone access.

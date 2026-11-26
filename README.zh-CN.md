@@ -10,6 +10,8 @@
 
 你需要一台搭载 **Apple 芯片、运行 macOS 27 或更高版本的 Mac**，以及一张 **macOS 能识别的 USB HDMI 采集卡**。
 
+开发与实测环境为搭载 M3 Max 芯片的 Mac，系统为 macOS 27。
+
 1. 从 [GitHub Releases](https://github.com/eliosxie/PlayGlide/releases) 下载 macOS arm64 的 **DMG**。双击打开，将 **PlayGlide.app** 拖到「Applications（应用程序）」文件夹。当前构建使用临时签名，未经 Apple 公证，macOS 可能会阻止首次启动。[Apple 关于打开下载应用的说明](https://support.apple.com/zh-cn/102445)
 2. 将主机的 HDMI 输出接到采集卡的 HDMI 输入，再用 USB 把采集卡连到 Mac。采集需要未受 HDCP 保护的 HDMI 信号。
 3. 打开 PlayGlide，选择采集卡和采集格式，点击「开始采集」，按提示允许相机访问。要播放游戏声音，请勾选「播放采集卡音频并同步视频」，并允许麦克风访问。
