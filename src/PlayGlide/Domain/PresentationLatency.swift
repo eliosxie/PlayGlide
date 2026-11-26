@@ -299,14 +299,24 @@ struct CaptureClock: Sendable {
     static var decoupleTransportFloor: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_CLOCK_TRANSPORT_FLOOR"] != "0"
     }
+    /// Use asymmetric lower-envelope tracking (fast downward attack, slow upward release) to lock onto
+    /// the zero-queue arrival floor under one-sided UVC burst sawtooth (`PLAYGLIDE_CLOCK_LOWER_ENVELOPE=1`).
+    static var lowerEnvelopeEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_CLOCK_LOWER_ENVELOPE"] == "1"
+    }
     private static let lockWarmupSamples = 60
     private static let transportJitterFloor = 0.011
+    private let tracksLowerEnvelope: Bool
     private var offset: Double?
     private var drift = 0.0
     private var outside = 0.0
     private var previousPTS: Double?
     private var lockedSamples = 0
     private(set) var jitter = 0.0
+
+    init(tracksLowerEnvelope: Bool = CaptureClock.lowerEnvelopeEnabled) {
+        self.tracksLowerEnvelope = tracksLowerEnvelope
+    }
 
     mutating func anchor(pts: Double, arrival: Double, interval: Double) -> Double {
         guard pts.isFinite, arrival.isFinite, interval.isFinite, interval > 0 else { return arrival }
@@ -340,8 +350,20 @@ struct CaptureClock: Sendable {
             // Converge quickly on startup/reset, then tighten loop bandwidth so periodic capture-card
             // USB delivery sawtooth (~±7.5 ms every ~233 ms) does not wobble deadlines across refresh slots.
             let locked = lockedSamples >= Self.lockWarmupSamples
-            let offsetGain = locked ? 0.025 : 0.1
-            let driftGain = locked ? 0.0003 : 0.0025
+            let offsetGain: Double
+            let driftGain: Double
+            if tracksLowerEnvelope {
+                if error < 0 {
+                    offsetGain = locked ? 0.20 : 0.45
+                    driftGain = locked ? 0.0005 : 0.002
+                } else {
+                    offsetGain = locked ? 0.004 : 0.02
+                    driftGain = locked ? 0.0001 : 0.0008
+                }
+            } else {
+                offsetGain = locked ? 0.025 : 0.1
+                driftGain = locked ? 0.0003 : 0.0025
+            }
             self.offset = offset + offsetGain * error + drift
             drift = min(interval * 0.002, max(-interval * 0.002, drift + driftGain * error))
             if !locked { lockedSamples += 1 }
