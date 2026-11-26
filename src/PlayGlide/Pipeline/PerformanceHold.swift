@@ -31,8 +31,10 @@ final class PerformanceHold: Sendable {
     private let spinning = Atomic<Bool>(false)
     private let holds = Atomic<Int>(0)
     private let wake = DispatchSemaphore(value: 0)
+    let usesFastPathSpin: Bool
 
-    init() {
+    init(usesFastPathSpin: Bool = FrameMailbox.fastPathEnabled) {
+        self.usesFastPathSpin = usesFastPathSpin
         let thread = Thread { [self] in run() }
         thread.name = "PlayGlide.performance.hold"
         thread.qualityOfService = .userInteractive
@@ -61,13 +63,14 @@ final class PerformanceHold: Sendable {
     var holdCount: Int { holds.load(ordering: .relaxed) }
 
     private func run() {
+        let fastPath = usesFastPathSpin
         while !stopped.load(ordering: .acquiring) {
             wake.wait()
             while !stopped.load(ordering: .relaxed) {
                 let end = Double(bitPattern: until.load(ordering: .acquiring))
                 guard end > 0, mediaHostTime() < end else { break }
                 if !spinning.load(ordering: .relaxed) { spinning.store(true, ordering: .releasing) }
-                if FrameMailbox.fastPathEnabled {
+                if fastPath {
                     for _ in 0..<128 {
                         if stopped.load(ordering: .relaxed) || until.load(ordering: .relaxed) == 0 { break }
                     }
