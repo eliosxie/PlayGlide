@@ -20,13 +20,15 @@ struct VideoFrame: Sendable {
     // Valid window content within the processing canvas, in bottom-left pixel coordinates.
     var contentRect: CGRect? = nil
     var windowStamp: WindowFrameStamp? = nil
+    var pictureSignature: PictureSignature? = nil
     var size: VideoSize {
         pixelBuffer.withUnsafeBuffer { VideoSize(width: CVPixelBufferGetWidth($0), height: CVPixelBufferGetHeight($0)) }
     }
     func timed(at time: CMTime, duration: CMTime) -> VideoFrame {
         VideoFrame(
             pixelBuffer: pixelBuffer, presentationTime: time, duration: duration,
-            sequence: sequence, arrivalTime: arrivalTime, contentRect: contentRect, windowStamp: windowStamp)
+            sequence: sequence, arrivalTime: arrivalTime, contentRect: contentRect, windowStamp: windowStamp,
+            pictureSignature: pictureSignature)
     }
 }
 

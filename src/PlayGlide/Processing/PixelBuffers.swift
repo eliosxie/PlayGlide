@@ -160,7 +160,13 @@ final class PixelConverter {
 
     /// Copies every active plane byte. Matching strides use one copy per plane, ending at the last row's active bytes.
     /// Large 4K surfaces stripe across four workers to cut uncached UVC DMA IOSurface read latency by ~3×.
-    static func copyPlanes(from source: CVPixelBuffer, to destination: CVPixelBuffer) throws {
+    /// When `collectSignature` is true, samples the sparse 32×18 `PictureSignature` from the hot destination buffer
+    /// under the same pixel-buffer lock so downstream `ContentDetector` avoids a second lock and memory walk.
+    @discardableResult
+    static func copyPlanes(
+        from source: CVPixelBuffer, to destination: CVPixelBuffer,
+        collectSignature: Bool = false, skipRedundantExtendedFill: Bool = false
+    ) throws -> PictureSignature? {
         let format = CVPixelBufferGetPixelFormatType(source)
         guard format == CVPixelBufferGetPixelFormatType(destination),
             CVPixelBufferGetWidth(source) == CVPixelBufferGetWidth(destination),
@@ -178,9 +184,10 @@ final class PixelConverter {
         let planes = planar ? CVPixelBufferGetPlaneCount(source) : 1
         guard planar == CVPixelBufferIsPlanar(destination), !planar || CVPixelBufferGetPlaneCount(destination) == planes
         else { throw PipelineError(AppText("像素平面布局无效", "Invalid pixel plane layout.")) }
-        var layouts: [(src: Int, dst: Int, srcRow: Int, dstRow: Int, bytes: Int, height: Int)] = []
+        var layouts: [(src: Int, dst: Int, srcRow: Int, dstRow: Int, bytes: Int, width: Int, height: Int)] = []
         layouts.reserveCapacity(planes)
         var totalBytes = 0
+        var hasDestinationRowPadding = false
         for plane in 0..<planes {
             let sourceBase =
                 planar ? CVPixelBufferGetBaseAddressOfPlane(source, plane) : CVPixelBufferGetBaseAddress(source)
@@ -198,10 +205,11 @@ final class PixelConverter {
             guard let sourceBase, let targetBase, height > 0, sourceRow >= bytes, targetRow >= bytes else {
                 throw PipelineError(AppText("像素平面布局无效", "Invalid pixel plane layout."))
             }
+            if targetRow > bytes { hasDestinationRowPadding = true }
             layouts.append(
                 (
                     src: Int(bitPattern: sourceBase), dst: Int(bitPattern: targetBase),
-                    srcRow: sourceRow, dstRow: targetRow, bytes: bytes, height: height
+                    srcRow: sourceRow, dstRow: targetRow, bytes: bytes, width: width, height: height
                 ))
             totalBytes += bytes * height
         }
@@ -249,7 +257,33 @@ final class PixelConverter {
                 }
             }
         }
-        CVPixelBufferFillExtendedPixels(destination)
+        let signature: PictureSignature?
+        if collectSignature, let primary = layouts.first,
+            let primaryBase = UnsafeRawPointer(bitPattern: primary.dst)
+        {
+            let chromaLayout = planar && layouts.count > 1 ? layouts[1] : nil
+            let chromaBase = chromaLayout.flatMap { UnsafeRawPointer(bitPattern: $0.dst) }
+            signature = ContentDetector.sampleLocked(
+                format: format, planar: planar, base: primaryBase, rowStride: primary.dstRow,
+                width: primary.width, height: primary.height, chroma: chromaBase,
+                chromaWidth: chromaLayout?.width ?? 0, chromaHeight: chromaLayout?.height ?? 0,
+                chromaStride: chromaLayout?.dstRow ?? 0)
+        } else {
+            signature = nil
+        }
+        var needsExtendedFill = true
+        if skipRedundantExtendedFill && !hasDestinationRowPadding {
+            var left = 0
+            var right = 0
+            var top = 0
+            var bottom = 0
+            CVPixelBufferGetExtendedPixels(destination, &left, &right, &top, &bottom)
+            needsExtendedFill = left != 0 || right != 0 || top != 0 || bottom != 0
+        }
+        if needsExtendedFill {
+            CVPixelBufferFillExtendedPixels(destination)
+        }
+        return signature
     }
 
     private static func bytesPerPixel(format: OSType, plane: Int) throws -> Int {
@@ -400,6 +434,12 @@ struct CaptureSurfaceDescription: Equatable, Sendable {
 /// Owned by one serial capture callback queue or test producer. Returns an owned read-only image
 /// before the borrowed source buffer goes back to its producer.
 final class CaptureFrameIngest {
+    /// Sample the sparse 32×18 `PictureSignature` inline during plane copy and skip redundant
+    /// `CVPixelBufferFillExtendedPixels` when rows have no padding (`PLAYGLIDE_INGEST_INLINE_SIGNATURE=1`).
+    static var inlineSignatureEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_INGEST_INLINE_SIGNATURE"] == "1"
+    }
+
     enum Mode: String, Sendable {
         case automatic
         case coreImage = "coreimage"
@@ -414,6 +454,19 @@ final class CaptureFrameIngest {
         /// Set for the first surface and whenever its color contract changes.
         let changedDescription: CaptureSurfaceDescription?
         let isHDR10PQ: Bool
+        let signature: PictureSignature?
+
+        init(
+            pixelBuffer: CVReadOnlyPixelBuffer, copied: Bool,
+            changedDescription: CaptureSurfaceDescription?, isHDR10PQ: Bool,
+            signature: PictureSignature? = nil
+        ) {
+            self.pixelBuffer = pixelBuffer
+            self.copied = copied
+            self.changedDescription = changedDescription
+            self.isHDR10PQ = isHDR10PQ
+            self.signature = signature
+        }
     }
 
     let mode: Mode
@@ -444,7 +497,9 @@ final class CaptureFrameIngest {
             colorMode: hdr10PQ ? .hdr10PQ : .sdrRec709)
     }
 
-    func ingest(_ buffer: CVPixelBuffer) throws -> Output {
+    func ingest(
+        _ buffer: CVPixelBuffer, collectSignature: Bool = CaptureFrameIngest.inlineSignatureEnabled
+    ) throws -> Output {
         let description = CaptureSurfaceDescription(buffer)
         let frameIsHDR10: Bool
         switch colorMode {
@@ -469,12 +524,17 @@ final class CaptureFrameIngest {
                 // Repeated 30-over-60 frames reuse the last immutable read-only surface directly,
                 // avoiding a 12.4 MB 4K copy and allowing ContentDetector to short-circuit by pointer identity.
                 return Output(
-                    pixelBuffer: previous.buffer, copied: true, changedDescription: nil, isHDR10PQ: frameIsHDR10)
+                    pixelBuffer: previous.buffer, copied: true, changedDescription: nil, isHDR10PQ: frameIsHDR10,
+                    signature: previous.signature)
             }
             let output = try pool.makeMutable()
             var effectiveDescription = description
+            var inlineSignature: PictureSignature?
             try output.withUnsafeBuffer { destination in
-                try PixelConverter.copyPlanes(from: buffer, to: destination)
+                inlineSignature = try PixelConverter.copyPlanes(
+                    from: buffer, to: destination,
+                    collectSignature: collectSignature && signature == nil,
+                    skipRedundantExtendedFill: collectSignature)
                 if frameIsHDR10 {
                     PixelConverter.adoptHDR10PQAttachments(from: buffer, to: destination)
                     effectiveDescription = CaptureSurfaceDescription(destination)
@@ -485,8 +545,12 @@ final class CaptureFrameIngest {
             changed = effectiveDescription == lastDescription ? nil : effectiveDescription
             lastDescription = effectiveDescription
             let owned = CVReadOnlyPixelBuffer(output)
-            lastOutput = deduplicatesIdenticalBuffers ? signature.map { (owned, $0, description, frameIsHDR10) } : nil
-            return Output(pixelBuffer: owned, copied: true, changedDescription: changed, isHDR10PQ: frameIsHDR10)
+            let resolvedSignature = signature ?? inlineSignature
+            lastOutput =
+                deduplicatesIdenticalBuffers ? resolvedSignature.map { (owned, $0, description, frameIsHDR10) } : nil
+            return Output(
+                pixelBuffer: owned, copied: true, changedDescription: changed, isHDR10PQ: frameIsHDR10,
+                signature: resolvedSignature)
         }
         changed = description == lastDescription ? nil : description
         lastDescription = description
@@ -510,7 +574,7 @@ final class ContentDetector {
 
     func rebase(to frame: VideoFrame) {
         let buffer = frame.pixelBuffer
-        if reference?.buffer !== buffer { reference = (buffer, sample(buffer)) }
+        if reference?.buffer !== buffer { reference = (buffer, frame.pictureSignature ?? sample(buffer)) }
     }
 
     func isDuplicate(_ frame: VideoFrame, confirmDuplicate: Bool = true) -> Bool {
@@ -518,7 +582,7 @@ final class ContentDetector {
         confirmationSeconds = nil
         let buffer = frame.pixelBuffer
         if reference?.buffer === buffer { return confirmDuplicate }
-        let current = sample(buffer)
+        let current = frame.pictureSignature ?? sample(buffer)
         let size = buffer.size
         if let current, let reference, let previous = reference.signature, reference.buffer.size == size {
             sceneCut = current.isSceneCut(from: previous)
@@ -723,6 +787,16 @@ final class ContentDetector {
         let chromaWidth = planar ? CVPixelBufferGetWidthOfPlane(raw, 1) : 0
         let chromaHeight = planar ? CVPixelBufferGetHeightOfPlane(raw, 1) : 0
         let chromaStride = planar ? CVPixelBufferGetBytesPerRowOfPlane(raw, 1) : 0
+        return sampleLocked(
+            format: format, planar: planar, base: base, rowStride: row, width: width, height: height,
+            chroma: chroma, chromaWidth: chromaWidth, chromaHeight: chromaHeight, chromaStride: chromaStride)
+    }
+
+    static func sampleLocked(
+        format: OSType, planar: Bool, base: UnsafeRawPointer, rowStride: Int, width: Int, height: Int,
+        chroma: UnsafeRawPointer?, chromaWidth: Int, chromaHeight: Int, chromaStride: Int
+    ) -> PictureSignature? {
+        guard width > 0, height > 0, rowStride >= width * (planar ? 1 : 4) else { return nil }
         if planar {
             guard chroma != nil, chromaWidth > 0, chromaHeight > 0, chromaStride >= chromaWidth * 2 else {
                 return nil
@@ -732,7 +806,7 @@ final class ContentDetector {
         samples.reserveCapacity(PictureSignature.rows * PictureSignature.columns)
         for y in 0..<PictureSignature.rows {
             let rowIndex = y * height / PictureSignature.rows
-            let line = base.advanced(by: rowIndex * row).assumingMemoryBound(to: UInt8.self)
+            let line = base.advanced(by: rowIndex * rowStride).assumingMemoryBound(to: UInt8.self)
             let chromaLine = chroma?.advanced(by: min(chromaHeight - 1, rowIndex / 2) * chromaStride)
                 .assumingMemoryBound(to: UInt8.self)
             for x in 0..<PictureSignature.columns {

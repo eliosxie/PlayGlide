@@ -596,7 +596,7 @@ private final class CaptureDelegate: NSObject, AVCaptureVideoDataOutputSampleBuf
                     let owned = try ingest.ingest(buffer)
                     let frame = VideoFrame(
                         pixelBuffer: owned.pixelBuffer, presentationTime: time, duration: duration,
-                        sequence: sequence, arrivalTime: arrival)
+                        sequence: sequence, arrivalTime: arrival, pictureSignature: owned.signature)
                     sequence += 1
                     activeWarning = nil
                     mailbox.recordCaptureIngest(
