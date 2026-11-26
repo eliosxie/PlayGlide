@@ -104,6 +104,11 @@ final class HybridInterpolator {
     static var precomputeMotionDetailEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_PRECOMPUTE_MOTION_DETAIL"] == "1"
     }
+    /// Fuse CPU 2:1 NV12 luma and chroma downscale into a single parallel barrier and move 540p forward
+    /// downscaling into the concurrent motion-estimation task (`PLAYGLIDE_FUSED_CPU_SHRINK=1`).
+    static var fusedCPUShrinkEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_FUSED_CPU_SHRINK"] == "1"
+    }
     static let spatialMovingDetailEnabled =
         ProcessInfo.processInfo.environment["PLAYGLIDE_SPATIAL_MOVING_DETAIL"] == "1"
 
@@ -149,9 +154,22 @@ final class HybridInterpolator {
     private var outputNV12Pool: PixelBufferPool?
     var hasAllocatedOutputPools: Bool { outputPool != nil || outputNV12Pool != nil }
     private let outputsNV12 = ProcessInfo.processInfo.environment["PLAYGLIDE_HYBRID_NV12_OUT"] != "0"
+    private final class ForwardLowCache: Sendable {
+        private let entries = Mutex<[(source: CVReadOnlyPixelBuffer, low: CVReadOnlyPixelBuffer)]>([])
+        func lookup(_ key: CVReadOnlyPixelBuffer) -> CVReadOnlyPixelBuffer? {
+            entries.withLock { $0.first(where: { $0.source === key })?.low }
+        }
+        func insert(key: CVReadOnlyPixelBuffer, value: CVReadOnlyPixelBuffer) {
+            entries.withLock { list in
+                list = Array((list + [(key, value)]).suffix(2))
+            }
+        }
+        func removeAll() { entries.withLock { $0.removeAll() } }
+    }
+
     private var cachedLow: [(source: CVReadOnlyPixelBuffer, low: CVReadOnlyPixelBuffer)] = []
     private var cachedMotionLow: [(source: CVReadOnlyPixelBuffer, low: CVReadOnlyPixelBuffer)] = []
-    private var cachedForwardLow: [(source: CVReadOnlyPixelBuffer, low: CVReadOnlyPixelBuffer)] = []
+    private let cachedForwardLow = ForwardLowCache()
     /// Fuses hybrid midpoint composition directly into the Metal preview render pass, removing the 12.4 MB
     /// 4K 420v intermediate write and CPU waitUntilCompleted() from the critical path. `PLAYGLIDE_DEFERRED_COMPOSE=0`
     /// restores eager 420v composition for A/B runs.
@@ -162,6 +180,8 @@ final class HybridInterpolator {
     /// Exact 2:1 NV12 inputs (4K -> 1080p) shrink on the CPU with SIMD halving adds instead of waking
     /// the GPU for a separate Metal pass. `PLAYGLIDE_HYBRID_CPU_SHRINK=0` keeps Metal for A/B runs.
     var usesCPUDownscale = ProcessInfo.processInfo.environment["PLAYGLIDE_HYBRID_CPU_SHRINK"] != "0"
+    /// Single-barrier fused luma+chroma CPU shrink and async 540p forward downscale (`PLAYGLIDE_FUSED_CPU_SHRINK=1`).
+    var usesFusedCPUShrink = HybridInterpolator.fusedCPUShrinkEnabled
 
     /// The largest even size within VT low-latency's limits that keeps the input aspect ratio.
     /// Passing `maxHeight: 720` (or `PLAYGLIDE_HYBRID_LOW=720`) stays inside Apple Neural Engine
@@ -380,7 +400,11 @@ final class HybridInterpolator {
         guard let motionSourcePool else { return nil }
         if let hit = cachedMotionLow.first(where: { $0.source === frame.pixelBuffer }) { return hit.low }
         let output = try motionSourcePool.makeMutable()
-        guard shrinkNV12HalfOnCPU(from: frame.pixelBuffer, sourceSize: input, to: output, targetSize: motionSize) else {
+        guard
+            Self.shrinkNV12HalfOnCPU(
+                from: frame.pixelBuffer, sourceSize: input, to: output, targetSize: motionSize,
+                fused: usesFusedCPUShrink)
+        else {
             return nil
         }
         let low = CVReadOnlyPixelBuffer(output)
@@ -394,12 +418,15 @@ final class HybridInterpolator {
         -> CVReadOnlyPixelBuffer?
     {
         guard let forwardSourcePool else { return motionRef }
-        if let hit = cachedForwardLow.first(where: { $0.source === key }) { return hit.low }
+        if let hit = cachedForwardLow.lookup(key) { return hit }
         let output = try forwardSourcePool.makeMutable()
-        guard shrinkNV12HalfOnCPU(from: motionRef, sourceSize: motionSize, to: output, targetSize: forwardMotionSize)
+        guard
+            Self.shrinkNV12HalfOnCPU(
+                from: motionRef, sourceSize: motionSize, to: output, targetSize: forwardMotionSize,
+                fused: usesFusedCPUShrink)
         else { return nil }
         let low = CVReadOnlyPixelBuffer(output)
-        cachedForwardLow = Array((cachedForwardLow + [(key, low)]).suffix(2))
+        cachedForwardLow.insert(key: key, value: low)
         return low
     }
 
@@ -409,7 +436,9 @@ final class HybridInterpolator {
         if let hit = cachedLow.first(where: { $0.source === frame.pixelBuffer }) { return hit.low }
         let output = try sourcePool.makeMutable()
         if usesCPUDownscale && input.width == low.width * 2 && input.height == low.height * 2,
-            shrinkNV12HalfOnCPU(from: frame.pixelBuffer, sourceSize: input, to: output, targetSize: low)
+            Self.shrinkNV12HalfOnCPU(
+                from: frame.pixelBuffer, sourceSize: input, to: output, targetSize: low,
+                fused: usesFusedCPUShrink)
         {
             let low = CVReadOnlyPixelBuffer(output)
             cachedLow = Array((cachedLow + [(frame.pixelBuffer, low)]).suffix(2))
@@ -514,6 +543,12 @@ final class HybridInterpolator {
         try destinationPool.makeVTFrame(at: time)
     }
 
+    private final class ExclusiveMutableBuffer: @unchecked Sendable {
+        var buffer: CVMutablePixelBuffer?
+        init(_ buffer: consuming CVMutablePixelBuffer) { self.buffer = consume buffer }
+        func take() -> CVMutablePixelBuffer? { buffer.take() }
+    }
+
     /// Starts hardware motion estimation on the media engine so it can run concurrently with VT.
     /// Computes `B → A` (and `A → B` when bidirectional occlusion estimation is enabled; ~4.6 ms total at 1080p,
     /// fully hidden inside the ~12 ms VT pass). Skips non-420v inputs gracefully.
@@ -552,15 +587,34 @@ final class HybridInterpolator {
             refB = current.pixelBuffer
         }
         let forwardSession = forwardMotionSession
-        let fwdRefA: CVReadOnlyPixelBuffer?
-        let fwdRefB: CVReadOnlyPixelBuffer?
-        if forwardSession != nil {
+        let asyncForwardShrink = usesFusedCPUShrink && forwardSession != nil && forwardSourcePool != nil
+        var fwdRefA: CVReadOnlyPixelBuffer?
+        var fwdRefB: CVReadOnlyPixelBuffer?
+        var pendingOutA: ExclusiveMutableBuffer?
+        var pendingOutB: ExclusiveMutableBuffer?
+        if asyncForwardShrink, let forwardSourcePool {
+            fwdRefA = cachedForwardLow.lookup(previous.pixelBuffer)
+            fwdRefB = cachedForwardLow.lookup(current.pixelBuffer)
+            if fwdRefA == nil, let mutable = try? forwardSourcePool.makeMutable() {
+                pendingOutA = ExclusiveMutableBuffer(mutable)
+            }
+            if fwdRefB == nil, let mutable = try? forwardSourcePool.makeMutable() {
+                pendingOutB = ExclusiveMutableBuffer(mutable)
+            }
+        } else if forwardSession != nil {
             fwdRefA = try? forwardLowFrame(from: refA, key: previous.pixelBuffer)
             fwdRefB = try? forwardLowFrame(from: refB, key: current.pixelBuffer)
-        } else {
-            fwdRefA = nil
-            fwdRefB = nil
         }
+        let capturedMotionSize = motionSize
+        let capturedForwardSize = forwardMotionSize
+        let capturedPrevKey = previous.pixelBuffer
+        let capturedCurrKey = current.pixelBuffer
+        let capturedFused = usesFusedCPUShrink
+        let capturedForwardCache = cachedForwardLow
+        let initialFwdA = fwdRefA
+        let initialFwdB = fwdRefB
+        let outA = pendingOutA
+        let outB = pendingOutB
         return Task {
             let startedAt = mediaHostTime()
             guard
@@ -571,9 +625,35 @@ final class HybridInterpolator {
             let backwardFinishedAt = mediaHostTime()
             let forward: CVReadOnlyPixelBuffer?
             let forwardFinishedAt: Double?
-            if let forwardSession, let fwdRefA, let fwdRefB {
-                forward = try? await forwardSession.motion(of: fwdRefA, comparedTo: fwdRefB, flags: []).motionVector
-                forwardFinishedAt = forward != nil ? mediaHostTime() : nil
+            if let forwardSession {
+                var resolvedA = initialFwdA
+                var resolvedB = initialFwdB
+                if resolvedA == nil, let mutable = outA?.take(),
+                    Self.shrinkNV12HalfOnCPU(
+                        from: refA, sourceSize: capturedMotionSize, to: mutable, targetSize: capturedForwardSize,
+                        fused: capturedFused)
+                {
+                    let ready = CVReadOnlyPixelBuffer(mutable)
+                    resolvedA = ready
+                    capturedForwardCache.insert(key: capturedPrevKey, value: ready)
+                }
+                if resolvedB == nil, let mutable = outB?.take(),
+                    Self.shrinkNV12HalfOnCPU(
+                        from: refB, sourceSize: capturedMotionSize, to: mutable, targetSize: capturedForwardSize,
+                        fused: capturedFused)
+                {
+                    let ready = CVReadOnlyPixelBuffer(mutable)
+                    resolvedB = ready
+                    capturedForwardCache.insert(key: capturedCurrKey, value: ready)
+                }
+                if let resolvedA, let resolvedB {
+                    forward = try? await forwardSession.motion(of: resolvedA, comparedTo: resolvedB, flags: [])
+                        .motionVector
+                    forwardFinishedAt = forward != nil ? mediaHostTime() : nil
+                } else {
+                    forward = nil
+                    forwardFinishedAt = nil
+                }
             } else {
                 forward = nil
                 forwardFinishedAt = nil
@@ -980,9 +1060,11 @@ final class HybridInterpolator {
 
     /// Halves a 420v Rec.709 surface on the CPU using SIMD halving adds (ARM64 urhadd/uhadd), matching
     /// `shrinkLuma`/`shrinkChroma` across all six supported chroma sitings without a GPU round trip.
-    private func shrinkNV12HalfOnCPU(
+    /// When `fused` is true, large 4K -> 1080p surfaces execute luma and chroma inside one 4-strip parallel barrier.
+    static func shrinkNV12HalfOnCPU(
         from source: CVReadOnlyPixelBuffer, sourceSize: VideoSize,
-        to destination: borrowing CVMutablePixelBuffer, targetSize: VideoSize
+        to destination: borrowing CVMutablePixelBuffer, targetSize: VideoSize,
+        fused: Bool = HybridInterpolator.fusedCPUShrinkEnabled
     ) -> Bool {
         source.withUnsafeBuffer { src in
             guard CVPixelBufferGetPixelFormatType(src) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -1017,13 +1099,44 @@ final class HybridInterpolator {
                     srcUVRow >= sourceSize.width, dstUVRow >= lowChromaBytes
                 else { return false }
 
-                Self.shrinkLumaHalf(
-                    from: srcY, sourceRow: srcYRow, to: dstY, destinationRow: dstYRow,
-                    width: targetSize.width, height: targetSize.height)
-                Self.shrinkChromaHalf(
-                    from: srcUV, sourceRow: srcUVRow, sourceHeight: srcChromaHeight,
-                    to: dstUV, destinationRow: dstUVRow,
-                    rowBytes: lowChromaBytes, height: lowChromaHeight, siting: siting)
+                if fused && targetSize.width * targetSize.height >= 1_000_000 {
+                    let srcYAddr = Int(bitPattern: srcY)
+                    let dstYAddr = Int(bitPattern: dstY)
+                    let srcUVAddr = Int(bitPattern: srcUV)
+                    let dstUVAddr = Int(bitPattern: dstUV)
+                    let strips = 4
+                    DispatchQueue.concurrentPerform(iterations: strips) { strip in
+                        let startY = strip * targetSize.height / strips
+                        let endY = (strip + 1) * targetSize.height / strips
+                        if endY > startY,
+                            let ySrc = UnsafeRawPointer(bitPattern: srcYAddr),
+                            let yDst = UnsafeMutableRawPointer(bitPattern: dstYAddr)
+                        {
+                            Self.shrinkLumaRows(
+                                from: ySrc, sourceRow: srcYRow, to: yDst, destinationRow: dstYRow,
+                                width: targetSize.width, startY: startY, endY: endY)
+                        }
+                        let startUV = strip * lowChromaHeight / strips
+                        let endUV = (strip + 1) * lowChromaHeight / strips
+                        if endUV > startUV,
+                            let uvSrc = UnsafeRawPointer(bitPattern: srcUVAddr),
+                            let uvDst = UnsafeMutableRawPointer(bitPattern: dstUVAddr)
+                        {
+                            Self.shrinkChromaRows(
+                                from: uvSrc, sourceRow: srcUVRow, sourceHeight: srcChromaHeight,
+                                to: uvDst, destinationRow: dstUVRow, rowBytes: lowChromaBytes,
+                                startY: startUV, endY: endUV, siting: siting)
+                        }
+                    }
+                } else {
+                    Self.shrinkLumaHalf(
+                        from: srcY, sourceRow: srcYRow, to: dstY, destinationRow: dstYRow,
+                        width: targetSize.width, height: targetSize.height)
+                    Self.shrinkChromaHalf(
+                        from: srcUV, sourceRow: srcUVRow, sourceHeight: srcChromaHeight,
+                        to: dstUV, destinationRow: dstUVRow,
+                        rowBytes: lowChromaBytes, height: lowChromaHeight, siting: siting)
+                }
                 CVPixelBufferFillExtendedPixels(dst)
                 PixelConverter.attach709(to: dst)
                 return true
@@ -1047,6 +1160,31 @@ final class HybridInterpolator {
         uhadd(b, urhadd(a, urhadd(a, c)))
     }
 
+    private static func shrinkLumaRows(
+        from srcBase: UnsafeRawPointer, sourceRow: Int, to dstBase: UnsafeMutableRawPointer, destinationRow: Int,
+        width: Int, startY: Int, endY: Int
+    ) {
+        for y in startY..<endY {
+            let r0 = srcBase.advanced(by: (y * 2) * sourceRow)
+            let r1 = srcBase.advanced(by: (y * 2 + 1) * sourceRow)
+            let out = dstBase.advanced(by: y * destinationRow)
+            var x = 0
+            while x < width {
+                let sx = x * 2
+                let v0 = urhadd(
+                    r0.loadUnaligned(fromByteOffset: sx, as: SIMD16<UInt8>.self),
+                    r1.loadUnaligned(fromByteOffset: sx, as: SIMD16<UInt8>.self))
+                let v1 = urhadd(
+                    r0.loadUnaligned(fromByteOffset: sx + 16, as: SIMD16<UInt8>.self),
+                    r1.loadUnaligned(fromByteOffset: sx + 16, as: SIMD16<UInt8>.self))
+                let even = SIMD16<UInt8>(lowHalf: v0.evenHalf, highHalf: v1.evenHalf)
+                let odd = SIMD16<UInt8>(lowHalf: v0.oddHalf, highHalf: v1.oddHalf)
+                out.storeBytes(of: uhadd(even, odd), toByteOffset: x, as: SIMD16<UInt8>.self)
+                x += 16
+            }
+        }
+    }
+
     private static func shrinkLumaHalf(
         from src: UnsafeRawPointer, sourceRow: Int, to dst: UnsafeMutableRawPointer, destinationRow: Int,
         width: Int, height: Int
@@ -1061,25 +1199,9 @@ final class HybridInterpolator {
                 let srcBase = UnsafeRawPointer(bitPattern: srcAddr),
                 let dstBase = UnsafeMutableRawPointer(bitPattern: dstAddr)
             else { return }
-            for y in startY..<endY {
-                let r0 = srcBase.advanced(by: (y * 2) * sourceRow)
-                let r1 = srcBase.advanced(by: (y * 2 + 1) * sourceRow)
-                let out = dstBase.advanced(by: y * destinationRow)
-                var x = 0
-                while x < width {
-                    let sx = x * 2
-                    let v0 = urhadd(
-                        r0.loadUnaligned(fromByteOffset: sx, as: SIMD16<UInt8>.self),
-                        r1.loadUnaligned(fromByteOffset: sx, as: SIMD16<UInt8>.self))
-                    let v1 = urhadd(
-                        r0.loadUnaligned(fromByteOffset: sx + 16, as: SIMD16<UInt8>.self),
-                        r1.loadUnaligned(fromByteOffset: sx + 16, as: SIMD16<UInt8>.self))
-                    let even = SIMD16<UInt8>(lowHalf: v0.evenHalf, highHalf: v1.evenHalf)
-                    let odd = SIMD16<UInt8>(lowHalf: v0.oddHalf, highHalf: v1.oddHalf)
-                    out.storeBytes(of: uhadd(even, odd), toByteOffset: x, as: SIMD16<UInt8>.self)
-                    x += 16
-                }
-            }
+            Self.shrinkLumaRows(
+                from: srcBase, sourceRow: sourceRow, to: dstBase, destinationRow: destinationRow,
+                width: width, startY: startY, endY: endY)
         }
         if strips > 1 {
             DispatchQueue.concurrentPerform(iterations: strips, execute: work)
@@ -1088,14 +1210,82 @@ final class HybridInterpolator {
         }
     }
 
+    private static func shrinkChromaRows(
+        from srcBase: UnsafeRawPointer, sourceRow: Int, sourceHeight: Int,
+        to dstBase: UnsafeMutableRawPointer, destinationRow: Int,
+        rowBytes: Int, startY: Int, endY: Int, siting: SIMD2<Float>
+    ) {
+        let shiftRight = siting.x > 0
+        let shiftDown = siting.y > 0
+        let shiftUp = siting.y < 0
+        for y in startY..<endY {
+            let y0 = y * 2
+            let y1 = y0 + 1
+            let r0 = srcBase.advanced(by: y0 * sourceRow)
+            let r1 = srcBase.advanced(by: y1 * sourceRow)
+            let rExtra: UnsafeRawPointer?
+            if shiftDown {
+                rExtra = srcBase.advanced(by: min(y0 + 2, sourceHeight - 1) * sourceRow)
+            } else if shiftUp {
+                rExtra = srcBase.advanced(by: max(y0 - 1, 0) * sourceRow)
+            } else {
+                rExtra = nil
+            }
+            let out = dstBase.advanced(by: y * destinationRow)
+            @inline(__always)
+            func vertical(_ byteOffset: Int) -> SIMD16<UInt8> {
+                let a = r0.loadUnaligned(fromByteOffset: byteOffset, as: SIMD16<UInt8>.self)
+                let b = r1.loadUnaligned(fromByteOffset: byteOffset, as: SIMD16<UInt8>.self)
+                guard let rExtra else { return urhadd(a, b) }
+                let extra = rExtra.loadUnaligned(fromByteOffset: byteOffset, as: SIMD16<UInt8>.self)
+                return shiftDown ? weighted341(a, b, extra) : weighted341(b, a, extra)
+            }
+            @inline(__always)
+            func verticalPair(_ byteOffset: Int) -> UInt16 {
+                let a = r0.loadUnaligned(fromByteOffset: byteOffset, as: SIMD2<UInt8>.self)
+                let b = r1.loadUnaligned(fromByteOffset: byteOffset, as: SIMD2<UInt8>.self)
+                let result: SIMD2<UInt8>
+                if let rExtra {
+                    let extra = rExtra.loadUnaligned(fromByteOffset: byteOffset, as: SIMD2<UInt8>.self)
+                    let p0 = shiftDown ? a : b
+                    let p1 = shiftDown ? b : a
+                    let avg02 = (p0 | extra) &- ((p0 ^ extra) &>> 1)
+                    let avg0 = (p0 | avg02) &- ((p0 ^ avg02) &>> 1)
+                    result = (p1 & avg0) &+ ((p1 ^ avg0) &>> 1)
+                } else {
+                    result = (a | b) &- ((a ^ b) &>> 1)
+                }
+                return unsafeBitCast(result, to: UInt16.self)
+            }
+            var x = 0
+            while x < rowBytes {
+                let sx = x * 2
+                let u0 = unsafeBitCast(vertical(sx), to: SIMD8<UInt16>.self)
+                let u1 = unsafeBitCast(vertical(sx + 16), to: SIMD8<UInt16>.self)
+                let p0Pairs = SIMD8<UInt16>(lowHalf: u0.evenHalf, highHalf: u1.evenHalf)
+                let p1Pairs = SIMD8<UInt16>(lowHalf: u0.oddHalf, highHalf: u1.oddHalf)
+                let p0 = unsafeBitCast(p0Pairs, to: SIMD16<UInt8>.self)
+                let p1 = unsafeBitCast(p1Pairs, to: SIMD16<UInt8>.self)
+                if !shiftRight {
+                    out.storeBytes(of: uhadd(p0, p1), toByteOffset: x, as: SIMD16<UInt8>.self)
+                } else {
+                    let nextPair = x + 16 < rowBytes ? verticalPair(sx + 32) : p1Pairs[7]
+                    let p2Pairs = SIMD8<UInt16>(
+                        p0Pairs[1], p0Pairs[2], p0Pairs[3], p0Pairs[4],
+                        p0Pairs[5], p0Pairs[6], p0Pairs[7], nextPair)
+                    let p2 = unsafeBitCast(p2Pairs, to: SIMD16<UInt8>.self)
+                    out.storeBytes(of: weighted341(p0, p1, p2), toByteOffset: x, as: SIMD16<UInt8>.self)
+                }
+                x += 16
+            }
+        }
+    }
+
     private static func shrinkChromaHalf(
         from src: UnsafeRawPointer, sourceRow: Int, sourceHeight: Int,
         to dst: UnsafeMutableRawPointer, destinationRow: Int,
         rowBytes: Int, height: Int, siting: SIMD2<Float>
     ) {
-        let shiftRight = siting.x > 0
-        let shiftDown = siting.y > 0
-        let shiftUp = siting.y < 0
         let srcAddr = Int(bitPattern: src)
         let dstAddr = Int(bitPattern: dst)
         let strips = rowBytes * height >= 500_000 ? 4 : 1
@@ -1106,67 +1296,10 @@ final class HybridInterpolator {
                 let srcBase = UnsafeRawPointer(bitPattern: srcAddr),
                 let dstBase = UnsafeMutableRawPointer(bitPattern: dstAddr)
             else { return }
-            for y in startY..<endY {
-                let y0 = y * 2
-                let y1 = y0 + 1
-                let r0 = srcBase.advanced(by: y0 * sourceRow)
-                let r1 = srcBase.advanced(by: y1 * sourceRow)
-                let rExtra: UnsafeRawPointer?
-                if shiftDown {
-                    rExtra = srcBase.advanced(by: min(y0 + 2, sourceHeight - 1) * sourceRow)
-                } else if shiftUp {
-                    rExtra = srcBase.advanced(by: max(y0 - 1, 0) * sourceRow)
-                } else {
-                    rExtra = nil
-                }
-                let out = dstBase.advanced(by: y * destinationRow)
-                @inline(__always)
-                func vertical(_ byteOffset: Int) -> SIMD16<UInt8> {
-                    let a = r0.loadUnaligned(fromByteOffset: byteOffset, as: SIMD16<UInt8>.self)
-                    let b = r1.loadUnaligned(fromByteOffset: byteOffset, as: SIMD16<UInt8>.self)
-                    guard let rExtra else { return urhadd(a, b) }
-                    let extra = rExtra.loadUnaligned(fromByteOffset: byteOffset, as: SIMD16<UInt8>.self)
-                    return shiftDown ? weighted341(a, b, extra) : weighted341(b, a, extra)
-                }
-                @inline(__always)
-                func verticalPair(_ byteOffset: Int) -> UInt16 {
-                    let a = r0.loadUnaligned(fromByteOffset: byteOffset, as: SIMD2<UInt8>.self)
-                    let b = r1.loadUnaligned(fromByteOffset: byteOffset, as: SIMD2<UInt8>.self)
-                    let result: SIMD2<UInt8>
-                    if let rExtra {
-                        let extra = rExtra.loadUnaligned(fromByteOffset: byteOffset, as: SIMD2<UInt8>.self)
-                        let p0 = shiftDown ? a : b
-                        let p1 = shiftDown ? b : a
-                        let avg02 = (p0 | extra) &- ((p0 ^ extra) &>> 1)
-                        let avg0 = (p0 | avg02) &- ((p0 ^ avg02) &>> 1)
-                        result = (p1 & avg0) &+ ((p1 ^ avg0) &>> 1)
-                    } else {
-                        result = (a | b) &- ((a ^ b) &>> 1)
-                    }
-                    return unsafeBitCast(result, to: UInt16.self)
-                }
-                var x = 0
-                while x < rowBytes {
-                    let sx = x * 2
-                    let u0 = unsafeBitCast(vertical(sx), to: SIMD8<UInt16>.self)
-                    let u1 = unsafeBitCast(vertical(sx + 16), to: SIMD8<UInt16>.self)
-                    let p0Pairs = SIMD8<UInt16>(lowHalf: u0.evenHalf, highHalf: u1.evenHalf)
-                    let p1Pairs = SIMD8<UInt16>(lowHalf: u0.oddHalf, highHalf: u1.oddHalf)
-                    let p0 = unsafeBitCast(p0Pairs, to: SIMD16<UInt8>.self)
-                    let p1 = unsafeBitCast(p1Pairs, to: SIMD16<UInt8>.self)
-                    if !shiftRight {
-                        out.storeBytes(of: uhadd(p0, p1), toByteOffset: x, as: SIMD16<UInt8>.self)
-                    } else {
-                        let nextPair = x + 16 < rowBytes ? verticalPair(sx + 32) : p1Pairs[7]
-                        let p2Pairs = SIMD8<UInt16>(
-                            p0Pairs[1], p0Pairs[2], p0Pairs[3], p0Pairs[4],
-                            p0Pairs[5], p0Pairs[6], p0Pairs[7], nextPair)
-                        let p2 = unsafeBitCast(p2Pairs, to: SIMD16<UInt8>.self)
-                        out.storeBytes(of: weighted341(p0, p1, p2), toByteOffset: x, as: SIMD16<UInt8>.self)
-                    }
-                    x += 16
-                }
-            }
+            Self.shrinkChromaRows(
+                from: srcBase, sourceRow: sourceRow, sourceHeight: sourceHeight,
+                to: dstBase, destinationRow: destinationRow,
+                rowBytes: rowBytes, startY: startY, endY: endY, siting: siting)
         }
         if strips > 1 {
             DispatchQueue.concurrentPerform(iterations: strips, execute: work)
