@@ -113,6 +113,7 @@ final class PreviewImageRenderer {
     private let caching: Bool
     private let prefersDirectDownsampling: Bool
     private let renderLibrary: (any MTLLibrary)?
+    private(set) var loadedFromPrecompiledMetallib = false
     private let textureCache: CVMetalTextureCache?
     private var renderPipelines: [MTLPixelFormat: any MTLRenderPipelineState] = [:]
     private var hybridRenderPipelines: [HybridPipelineKey: any MTLRenderPipelineState] = [:]
@@ -150,7 +151,19 @@ final class PreviewImageRenderer {
         self.context = context
         self.caching = caching
         self.prefersDirectDownsampling = prefersDirectDownsampling
-        renderLibrary = try? device.makeLibrary(source: Self.previewShader, options: nil)
+        if let loaded = try? MetalLibraryLoader.loadLibrary(
+            device: device,
+            requiredFunctions: [
+                "previewVertex", "previewFragment", "previewSelectMotion", "previewHybridFragment",
+            ],
+            fallbackSource: Self.previewShader)
+        {
+            renderLibrary = loaded.library
+            loadedFromPrecompiledMetallib = loaded.precompiled
+        } else {
+            renderLibrary = nil
+            loadedFromPrecompiledMetallib = false
+        }
         var cache: CVMetalTextureCache?
         let attributes = [kCVMetalTextureCacheMaximumTextureAgeKey as String: 1.0] as CFDictionary
         if CVMetalTextureCacheCreate(nil, attributes, device, nil, &cache) == kCVReturnSuccess {
@@ -1029,7 +1042,7 @@ final class PreviewImageRenderer {
         blit.endEncoding()
     }
 
-    private static let previewShader = """
+    static let previewShader = """
         #include <metal_stdlib>
         using namespace metal;
         struct SourceUniforms {

@@ -84,6 +84,7 @@ struct OpticalFlowTiming: Sendable {
 final class FlowInterpolator {
     let input: VideoSize
     let work: VideoSize
+    let loadedFromPrecompiledMetallib: Bool
     private(set) var timing: OpticalFlowTiming?
     private let device: any MTLDevice
     private let queue: any MTLCommandQueue
@@ -142,7 +143,12 @@ final class FlowInterpolator {
         }
         self.device = device
         self.queue = queue
-        let library = try device.makeLibrary(source: Self.shader, options: nil)
+        let loaded = try MetalLibraryLoader.loadLibrary(
+            device: device,
+            requiredFunctions: ["downscale", "interpolate"],
+            fallbackSource: Self.shader)
+        let library = loaded.library
+        loadedFromPrecompiledMetallib = loaded.precompiled
         func makePipeline(name: String, nv12: Bool) throws -> any MTLComputePipelineState {
             let constants = MTLFunctionConstantValues()
             var nv12 = nv12
@@ -473,7 +479,7 @@ final class FlowInterpolator {
         return result
     }
 
-    private static let shader = """
+    static let shader = """
         #include <metal_stdlib>
         using namespace metal;
         constant bool nv12 [[function_constant(0)]];

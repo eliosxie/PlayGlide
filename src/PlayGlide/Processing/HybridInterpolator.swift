@@ -62,6 +62,7 @@ final class HybridInterpolator {
     }
 
     private struct HybridPipelines: Sendable {
+        let loadedFromPrecompiledMetallib: Bool
         let shrinkLuma: any MTLComputePipelineState
         let shrinkChroma: any MTLComputePipelineState
         let selectMotion: any MTLComputePipelineState
@@ -117,6 +118,7 @@ final class HybridInterpolator {
     let multiplier: Int
     let detailMode: DetailMode
     let reusedCompiledPipelines: Bool
+    var loadedFromPrecompiledMetallib: Bool { pipelines.loadedFromPrecompiledMetallib }
     let session = VTFrameProcessor()
     private let motionSession: VTMotionEstimationSession?
     private let forwardMotionSession: VTMotionEstimationSession?
@@ -322,7 +324,11 @@ final class HybridInterpolator {
     }
 
     private static func makePipelines(device: any MTLDevice) throws -> HybridPipelines {
-        let library = try device.makeLibrary(source: Self.shader, options: nil)
+        let loaded = try MetalLibraryLoader.loadLibrary(
+            device: device,
+            requiredFunctions: ["shrinkLuma", "shrinkChroma", "selectMotion", "merge", "mergeNV12Out"],
+            fallbackSource: Self.shader)
+        let library = loaded.library
         func pipeline(
             _ name: String, nv12: Bool, hasMotion: Bool = false, hasForwardMotion: Bool = false,
             exactTwoX: Bool = false, sampleMid: Bool = false
@@ -342,6 +348,7 @@ final class HybridInterpolator {
                 function: try library.makeFunction(name: name, constantValues: constants))
         }
         return HybridPipelines(
+            loadedFromPrecompiledMetallib: loaded.precompiled,
             shrinkLuma: try pipeline("shrinkLuma", nv12: true),
             shrinkChroma: try pipeline("shrinkChroma", nv12: true),
             selectMotion: try pipeline("selectMotion", nv12: true, hasMotion: true, hasForwardMotion: false),
@@ -1308,7 +1315,7 @@ final class HybridInterpolator {
         }
     }
 
-    private static let shader = """
+    static let shader = """
         #include <metal_stdlib>
         using namespace metal;
         constant bool nv12 [[function_constant(0)]];

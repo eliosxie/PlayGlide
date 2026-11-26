@@ -15,7 +15,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "FB866BE286CD58AB5A2762A7"
+               BlueprintIdentifier = "830AAF94E1FECAD28C86F0ED"
                BuildableName = "PlayGlide.app"
                BlueprintName = "PlayGlide"
                ReferencedContainer = "container:PlayGlide.xcodeproj">
@@ -32,7 +32,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "FB866BE286CD58AB5A2762A7"
+            BlueprintIdentifier = "830AAF94E1FECAD28C86F0ED"
             BuildableName = "PlayGlide.app"
             BlueprintName = "PlayGlide"
             ReferencedContainer = "container:PlayGlide.xcodeproj">
@@ -55,7 +55,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "FB866BE286CD58AB5A2762A7"
+            BlueprintIdentifier = "830AAF94E1FECAD28C86F0ED"
             BuildableName = "PlayGlide.app"
             BlueprintName = "PlayGlide"
             ReferencedContainer = "container:PlayGlide.xcodeproj">
@@ -74,7 +74,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "FB866BE286CD58AB5A2762A7"
+            BlueprintIdentifier = "830AAF94E1FECAD28C86F0ED"
             BuildableName = "PlayGlide.app"
             BlueprintName = "PlayGlide"
             ReferencedContainer = "container:PlayGlide.xcodeproj">

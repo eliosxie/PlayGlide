@@ -37,6 +37,18 @@ done < <(/usr/bin/find "$repo_root/src/PlayGlide" -type f -name '*.swift' -print
 
 cp "$repo_root/config/Info.plist" "$preview_info"
 cp -R "$repo_root/src/PlayGlide/Resources/." "$preview_app/Contents/Resources/"
+
+# Precompile Metal shaders into default.metallib when the Metal Toolchain component is installed.
+if /usr/bin/xcrun --sdk macosx metal --version >/dev/null 2>&1; then
+    metal_sources=()
+    while IFS= read -r -d '' shader_path; do
+        metal_sources+=("$shader_path")
+    done < <(/usr/bin/find "$repo_root/src/PlayGlide/Shaders" -type f -name '*.metal' -print0)
+    if [[ ${#metal_sources[@]} -gt 0 ]]; then
+        /usr/bin/xcrun --sdk macosx metal -std=metal3.1 -mmacosx-version-min=15.0 -O2 \
+            -o "$preview_app/Contents/Resources/default.metallib" "${metal_sources[@]}"
+    fi
+fi
 /usr/bin/plutil -replace CFBundleExecutable -string PlayGlide "$preview_info"
 /usr/bin/plutil -replace CFBundleIdentifier -string "$bundle_identifier" "$preview_info"
 /usr/bin/plutil -replace CFBundleName -string PlayGlide "$preview_info"

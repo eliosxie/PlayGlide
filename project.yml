@@ -19,6 +19,8 @@ targets:
     platform: macOS
     sources:
       - path: src/PlayGlide
+        excludes:
+          - Shaders
     info:
       path: config/Info.plist
       properties:
