@@ -487,10 +487,17 @@ struct LiveFrameTiming: Sendable {
 
 /// Serial FrameProcessor-owned policy. Only native completion/read-only publication counts as readiness.
 struct LivePresentationController: Sendable {
+    /// Smoothly decay 1× passthrough scheduling delay toward the cold floor during sustained 60 fps menus
+    /// while preserving learned 2× readiness for instant return (`PLAYGLIDE_PASSTHROUGH_DELAY_DECAY=1`).
+    static var passthroughDelayDecayEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_PASSTHROUGH_DELAY_DECAY"] == "1"
+    }
+
     static let minimumSevereExecution = 0.1
     private static let readinessWindow = 1.0
     private static let maximumReadinessHold = 2.0
     private static let minimumReadinessSamples = 8
+    private static let passthroughDecayConfirmationFrames = 8
 
     private struct Sample: Sendable {
         let time: Double
@@ -506,6 +513,8 @@ struct LivePresentationController: Sendable {
     private var resumeSampleWindow: (oldest: Double, expires: Double)?
     private var needsResumeSeed = false
     private var passthroughActive = false
+    private var passthroughDelay: Double?
+    private var passthroughFramesSinceStart = 0
     private var selectedDelay = 0.0
     private var shrinkNotBefore = 0.0
     private var settlingAfterBootstrap = false
@@ -547,6 +556,8 @@ struct LivePresentationController: Sendable {
         resumeSampleWindow = nil
         needsResumeSeed = false
         passthroughActive = false
+        passthroughDelay = nil
+        passthroughFramesSinceStart = 0
         selectedDelay = 0
         shrinkNotBefore = 0
         settlingAfterBootstrap = false
@@ -559,17 +570,39 @@ struct LivePresentationController: Sendable {
     }
 
     /// Schedules a native 1× frame inside a 2× session (e.g., 60 fps menu inside 30→60) on the shared
-    /// `anchor + selectedDelay` timeline without decaying learned 2× readiness samples or interval history.
+    /// `anchor + delay` timeline without decaying learned 2× readiness samples or interval history.
+    /// When `decayPassthroughDelay` is enabled, sustained passthrough gradually lowers the active passthrough
+    /// delay toward `coldDelay` while keeping `selectedDelay` intact for returning to 2×.
     mutating func passthroughFrame(
         sequence: Int64, pts: Double, anchor: Double, outputInterval: Double,
         bufferedFrames: Double, now: Double, activatePassthrough: Bool = true,
-        compactColdDelay: Bool = ContentCadence.interactiveSixtyGuardEnabled
+        compactColdDelay: Bool = ContentCadence.interactiveSixtyGuardEnabled,
+        decayPassthroughDelay: Bool = LivePresentationController.passthroughDelayDecayEnabled
     ) -> LiveFrameTiming {
         let interval = max(0.001, outputInterval)
         let extra = max(0, bufferedFrames - 1) * interval
         let coldDelay = compactColdDelay ? (interval + extra) : (interval * 2 + extra)
-        let delay = selectedDelay > 0 ? selectedDelay : coldDelay
-        if activatePassthrough { passthroughActive = true }
+        let delay: Double
+        if activatePassthrough {
+            if !passthroughActive {
+                passthroughActive = true
+                passthroughFramesSinceStart = 0
+                passthroughDelay = selectedDelay > 0 ? selectedDelay : coldDelay
+            }
+            passthroughFramesSinceStart += 1
+            var activeDelay = passthroughDelay ?? (selectedDelay > 0 ? selectedDelay : coldDelay)
+            if decayPassthroughDelay,
+                passthroughFramesSinceStart > Self.passthroughDecayConfirmationFrames,
+                activeDelay > coldDelay
+            {
+                let step = min(0.0005, interval / 32)
+                activeDelay = max(coldDelay, activeDelay - step)
+                passthroughDelay = activeDelay
+            }
+            delay = activeDelay
+        } else {
+            delay = selectedDelay > 0 ? selectedDelay : coldDelay
+        }
         let pair = LivePairTiming(
             sequence: sequence, sourcePTS: pts, anchor: anchor, interval: interval,
             multiplier: 1, probe: false, evaluate: false, bootstrap: false, delay: delay)
@@ -593,6 +626,8 @@ struct LivePresentationController: Sendable {
         previousInterval = interval
         if passthroughActive {
             passthroughActive = false
+            passthroughDelay = nil
+            passthroughFramesSinceStart = 0
             if let last = samples.last?.time, samples.count >= Self.minimumReadinessSamples,
                 now >= last, selectedDelay > 0
             {
