@@ -876,11 +876,12 @@ final class HybridInterpolator {
                     throw PipelineError(AppText("无法编码混合插帧", "Could not encode hybrid interpolation."))
                 }
                 let hudDehalo = Self.hudDehaloEnabled
-                let motionFlags = (hudDehalo ? 8 : 0) | (Self.shaderSafeFiniteEnabled ? 16 : 0)
+                let hdrBits = isHDR10 ? (PreviewImageRenderer.hdr10SoftBlackToeEnabled ? 2 : 1) : 0
+                let motionFlags = hdrBits | (hudDehalo ? 8 : 0) | (Self.shaderSafeFiniteEnabled ? 16 : 0)
                 var weights = SIMD4<Float>(
                     phase, restoresStaticPixels ? 1 : 0,
                     sharpenStrength ?? detailMode.sharpenStrength,
-                    Float((hudDehalo ? 4 : 0) | (stabilizesSpatialDetail ? 8 : 0)))
+                    Float(hdrBits | (hudDehalo ? 4 : 0) | (stabilizesSpatialDetail ? 8 : 0)))
                 var motionParams = SIMD4<Float>(
                     1 / Float(motionSize.width), 1 / Float(motionSize.height),
                     Float(motionSize.width) / Float(forwardMotionSize.width),
@@ -1676,6 +1677,9 @@ final class HybridInterpolator {
                           uint2 gid [[thread_position_in_grid]]) {
             if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
             float2 uv = (float2(gid) + 0.5f) / float2(output.get_width(), output.get_height());
+            uint qualityFlags = uint(weights.w + 0.5f);
+            bool bt2020 = (qualityFlags & 3u) >= 1u;
+            bool softToe = (qualityFlags & 3u) >= 2u;
             half4 md = half4(0.0);
             bool lowStatic = false;
             if (hasMotion) {
@@ -1683,7 +1687,7 @@ final class HybridInterpolator {
                 lowStatic = md.z >= half(1.5);
                 if (lowStatic) md.z -= half(2.0);
             } else if (weights.y > 0.5f) {
-                half3 la = lowBlur(lowA, lowAChroma, uv), lb = lowBlur(lowB, lowBChroma, uv);
+                half3 la = lowBlur(lowA, lowAChroma, uv, bt2020, softToe), lb = lowBlur(lowB, lowBChroma, uv, bt2020, softToe);
                 lowStatic = length(la - lb) < half(0.012);
             }
             if (lowStatic) {
@@ -1790,6 +1794,9 @@ final class HybridInterpolator {
             uint2 base = gid * 2;
             float2 invFull = 1.0f / float2(outY.get_width(), outY.get_height());
             float2 uvCenter = (float2(base) + 1.0f) * invFull;
+            uint qualityFlags = uint(weights.w + 0.5f);
+            bool bt2020 = (qualityFlags & 3u) >= 1u;
+            bool softToe = (qualityFlags & 3u) >= 2u;
             half4 md = half4(0.0);
             bool lowStatic = false;
             if (hasMotion) {
@@ -1797,11 +1804,11 @@ final class HybridInterpolator {
                 lowStatic = md.z >= half(1.5);
                 if (lowStatic) md.z -= half(2.0);
             } else if (weights.y > 0.5f) {
-                half3 la = lowBlur(lowA, lowAChroma, uvCenter), lb = lowBlur(lowB, lowBChroma, uvCenter);
+                half3 la = lowBlur(lowA, lowAChroma, uvCenter, bt2020, softToe);
+                half3 lb = lowBlur(lowB, lowBChroma, uvCenter, bt2020, softToe);
                 lowStatic = length(la - lb) < half(0.012);
             }
             half tHalf = half(weights.x);
-            uint qualityFlags = uint(weights.w + 0.5f);
             bool hudDehalo = (qualityFlags & 4u) != 0u;
             half pairedConfidence = (qualityFlags & 8u) != 0u && hasMotion
                 ? smoothstep(half(0.25), half(0.80), min(md.z, md.w)) : half(0.0);
@@ -1821,9 +1828,11 @@ final class HybridInterpolator {
                 yA[3] = a.sample(nearestSampler, (float2(base) + float2(1.5f, 1.5f)) * invFull).r;
                 yB[3] = b.sample(nearestSampler, (float2(base) + float2(1.5f, 1.5f)) * invFull).r;
                 half2 dCbCr = (caUV - cbUV) * half(255.0 / 224.0);
-                half dR = half(1.5748) * dCbCr.y;
-                half dG = fma(half(-0.468124), dCbCr.y, half(-0.187324) * dCbCr.x);
-                half dB = half(1.8556) * dCbCr.x;
+                half dR = bt2020 ? (half(1.4746) * dCbCr.y) : (half(1.5748) * dCbCr.y);
+                half dG = bt2020
+                    ? fma(half(-0.57135), dCbCr.y, half(-0.16455) * dCbCr.x)
+                    : fma(half(-0.468124), dCbCr.y, half(-0.187324) * dCbCr.x);
+                half dB = bt2020 ? (half(1.8814) * dCbCr.x) : (half(1.8556) * dCbCr.x);
                 for (uint k = 0; k < 4; ++k) {
                     half dY = (yA[k] - yB[k]) * half(255.0 / 219.0);
                     half r = dY + dR;

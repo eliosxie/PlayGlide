@@ -117,6 +117,7 @@ final class PreviewImageRenderer {
     private let context: CIContext
     private let caching: Bool
     private let prefersDirectDownsampling: Bool
+    private let spatialPrecision: SpatialUpscaler.Precision
     private let renderLibrary: (any MTLLibrary)?
     private(set) var loadedFromPrecompiledMetallib = false
     private let textureCache: CVMetalTextureCache?
@@ -130,6 +131,7 @@ final class PreviewImageRenderer {
     private(set) var precomputedMotionUses = 0
     private(set) var pipelineCreations = 0
     private var spatial: SpatialUpscaler?
+    var activeSpatialPixelFormat: MTLPixelFormat? { spatial?.activePixelFormat }
     private var texture: (any MTLTexture)?
     private var key: Key?
     private var writer: (any MTLCommandBuffer)?
@@ -151,12 +153,14 @@ final class PreviewImageRenderer {
     private var reusedSpatialOutput = false
 
     init(
-        device: any MTLDevice, context: CIContext, caching: Bool = true, prefersDirectDownsampling: Bool = true
+        device: any MTLDevice, context: CIContext, caching: Bool = true, prefersDirectDownsampling: Bool = true,
+        spatialPrecision: SpatialUpscaler.Precision = SpatialUpscaler.configuredPrecision
     ) {
         self.device = device
         self.context = context
         self.caching = caching
         self.prefersDirectDownsampling = prefersDirectDownsampling
+        self.spatialPrecision = spatialPrecision
         if let loaded = try? MetalLibraryLoader.loadLibrary(
             device: device,
             requiredFunctions: [
@@ -288,7 +292,7 @@ final class PreviewImageRenderer {
         let video = frame.video
         var image = video.pixelBuffer.withUnsafeBuffer { CIImage(cvPixelBuffer: $0) }
         if frame.spatial {
-            if spatial == nil { spatial = SpatialUpscaler(device: device) }
+            if spatial == nil { spatial = SpatialUpscaler(device: device, precision: spatialPrecision) }
             guard let spatial else {
                 throw PipelineError(AppText("Spatial 资源不可用", "MetalFX Spatial resources are unavailable."))
             }
@@ -408,7 +412,7 @@ final class PreviewImageRenderer {
 
         let primarySource: MetalSource
         if frame.spatial {
-            if spatial == nil { spatial = SpatialUpscaler(device: device) }
+            if spatial == nil { spatial = SpatialUpscaler(device: device, precision: spatialPrecision) }
             guard let spatial else {
                 throw PipelineError(AppText("Spatial 资源不可用", "MetalFX Spatial resources are unavailable."))
             }
@@ -429,7 +433,7 @@ final class PreviewImageRenderer {
                     chromaOffset: rawVideo.chromaOffset)
                 try drawPass(
                     pipeline: inputPipeline, primary: fullSource, original: nil, compare: false, pqOutput: false,
-                    to: resources.input, command: command)
+                    suppressDither: spatialPrecision != .unorm8, to: resources.input, command: command)
                 resources.scaler.encode(commandBuffer: command)
                 spatialKey = spatialNext
                 spatialUpscales += 1
@@ -613,7 +617,7 @@ final class PreviewImageRenderer {
 
     private func drawPass(
         pipeline: any MTLRenderPipelineState, primary: MetalSource, original: MetalSource?, compare: Bool,
-        pqOutput: Bool, to destination: any MTLTexture, command: any MTLCommandBuffer
+        pqOutput: Bool, suppressDither: Bool = false, to destination: any MTLTexture, command: any MTLCommandBuffer
     ) throws {
         let descriptor = MTLRenderPassDescriptor()
         descriptor.colorAttachments[0].texture = destination
@@ -628,12 +632,13 @@ final class PreviewImageRenderer {
             original.map { sourceUniforms(for: $0, outputSize: outputSize, pqOutput: pqOutput) } ?? primaryUniforms
         let ditherScale: Float
         let usesDither =
-            pqOutput || primary.needsRec709ToSRGB || primary.isHDR10PQ
-            || (compare && ((original?.needsRec709ToSRGB ?? false) || (original?.isHDR10PQ ?? false)))
+            !suppressDither
+            && (pqOutput || primary.needsRec709ToSRGB || primary.isHDR10PQ
+                || (compare && ((original?.needsRec709ToSRGB ?? false) || (original?.isHDR10PQ ?? false))))
         if usesDither {
             if destination.pixelFormat == .bgra8Unorm {
                 ditherScale = Float(1.0 / 255.0)
-            } else if destination.pixelFormat == .bgr10a2Unorm {
+            } else if destination.pixelFormat == .bgr10a2Unorm || destination.pixelFormat == .rgb10a2Unorm {
                 ditherScale = Float(1.0 / 1023.0)
             } else {
                 ditherScale = 0
@@ -683,7 +688,7 @@ final class PreviewImageRenderer {
         } else {
             originalSource = nil
         }
-        if spatial == nil { spatial = SpatialUpscaler(device: device) }
+        if spatial == nil { spatial = SpatialUpscaler(device: device, precision: spatialPrecision) }
         guard let spatial else {
             throw PipelineError(AppText("Spatial 资源不可用", "MetalFX Spatial resources are unavailable."))
         }
@@ -697,7 +702,8 @@ final class PreviewImageRenderer {
             guard
                 try encodeDeferredHybrid(
                     frame, recipe: recipe, compare: false, pqOutput: false, to: resources.input,
-                    size: recipe.inputSize, ignoreContentRect: true, command: command)
+                    size: recipe.inputSize, ignoreContentRect: true, suppressDither: spatialPrecision != .unorm8,
+                    command: command)
             else { return false }
             resources.scaler.encode(commandBuffer: command)
             spatialKey = spatialNext
@@ -726,7 +732,7 @@ final class PreviewImageRenderer {
     private func encodeDeferredHybrid(
         _ frame: PresentationFrame, recipe: HybridPreviewRecipe, compare: Bool, pqOutput: Bool,
         to destination: any MTLTexture, size: VideoSize, ignoreContentRect: Bool = false,
-        command: any MTLCommandBuffer
+        suppressDither: Bool = false, command: any MTLCommandBuffer
     ) throws -> Bool {
         guard let textureCache else { return false }
         let contentRect = ignoreContentRect ? nil : frame.video.contentRect
@@ -869,10 +875,10 @@ final class PreviewImageRenderer {
         }
         let primaryUniforms = sourceUniforms(for: srcA, outputSize: size, pqOutput: pqOutput)
         let ditherScale: Float
-        if pqOutput || srcA.needsRec709ToSRGB || srcA.isHDR10PQ {
+        if !suppressDither && (pqOutput || srcA.needsRec709ToSRGB || srcA.isHDR10PQ) {
             if destination.pixelFormat == .bgra8Unorm {
                 ditherScale = Float(1.0 / 255.0)
-            } else if destination.pixelFormat == .bgr10a2Unorm {
+            } else if destination.pixelFormat == .bgr10a2Unorm || destination.pixelFormat == .rgb10a2Unorm {
                 ditherScale = Float(1.0 / 1023.0)
             } else {
                 ditherScale = 0
