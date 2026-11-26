@@ -641,10 +641,12 @@ private final class CaptureAudioDelegate: NSObject, AVCaptureAudioDataOutputSamp
 /// A bounded timer feeds up to 80 ms ahead plus one packet; backpressure cannot grow a task queue.
 final class CaptureAudioMonitor: Sendable {
     /// Pump newly received capture audio packets immediately under the same lock instead of waiting
-    /// up to 5 ms for the periodic timer (`PLAYGLIDE_AUDIO_IMMEDIATE_PUMP=1` or `PLAYGLIDE_FAST_PASSTHROUGH=1`).
+    /// up to 5 ms for the periodic timer (`PLAYGLIDE_AUDIO_IMMEDIATE_PUMP=0` opts out independently).
     static var immediatePumpEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_AUDIO_IMMEDIATE_PUMP"] == "1"
-            || PresentationMode.fastPassthroughEnabled
+        if let value = ProcessInfo.processInfo.environment["PLAYGLIDE_AUDIO_IMMEDIATE_PUMP"] {
+            return value != "0"
+        }
+        return PresentationMode.fastPassthroughEnabled
     }
 
     private struct PCM: Sendable {

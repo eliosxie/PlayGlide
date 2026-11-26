@@ -199,9 +199,9 @@ struct SessionPreferences: Sendable, Equatable, Codable {
 
 enum PresentationMode: String, CaseIterable, Identifiable, Sendable, Codable {
     /// Lower 1× passthrough audio-video delay floor and enable late selection across 1×/4× modes
-    /// (`PLAYGLIDE_FAST_PASSTHROUGH=1` opts in pending real-capture ABBA validation).
+    /// (`PLAYGLIDE_FAST_PASSTHROUGH=0` opts out for A/B rollback).
     static var fastPassthroughEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_FAST_PASSTHROUGH"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_FAST_PASSTHROUGH"] != "0"
     }
 
     case responsive, steady

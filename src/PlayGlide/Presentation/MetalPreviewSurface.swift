@@ -108,9 +108,9 @@ final class PreviewImageRenderer {
         ProcessInfo.processInfo.environment["PLAYGLIDE_HDR10_SOFT_TOE"] != "0"
     }
     /// Prewarm preview render and motion-selection Metal pipeline states off the display link callback
-    /// (`PLAYGLIDE_PREWARM_PIPELINES=1` opts in pending cold-start A/B comparison).
+    /// (`PLAYGLIDE_PREWARM_PIPELINES=0` opts out for cold-start A/B comparison).
     static var prewarmPipelinesEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_PREWARM_PIPELINES"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_PREWARM_PIPELINES"] != "0"
     }
 
     private let device: any MTLDevice

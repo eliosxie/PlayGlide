@@ -101,9 +101,10 @@ final class HybridInterpolator {
         ProcessInfo.processInfo.environment["PLAYGLIDE_SHADER_SAFE_FINITE"] != "0"
     }
     /// Precompute hybrid `selectMotion` asynchronously into a bounded 3-slot Metal texture pool synced via
-    /// `MTLSharedEvent` so the display link callback skips compute work (`PLAYGLIDE_PRECOMPUTE_MOTION_DETAIL=1`).
+    /// `MTLSharedEvent` so the display link callback skips compute work (`PLAYGLIDE_PRECOMPUTE_MOTION_DETAIL=0`
+    /// opts out for A/B rollback).
     static var precomputeMotionDetailEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_PRECOMPUTE_MOTION_DETAIL"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_PRECOMPUTE_MOTION_DETAIL"] != "0"
     }
     /// Fuse CPU 2:1 NV12 luma and chroma downscale into a single parallel barrier and move 540p forward
     /// downscaling into the concurrent motion-estimation task (`PLAYGLIDE_FUSED_CPU_SHRINK=1`).

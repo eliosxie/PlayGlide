@@ -435,9 +435,9 @@ struct CaptureSurfaceDescription: Equatable, Sendable {
 /// before the borrowed source buffer goes back to its producer.
 final class CaptureFrameIngest {
     /// Sample the sparse 32×18 `PictureSignature` inline during plane copy and skip redundant
-    /// `CVPixelBufferFillExtendedPixels` when rows have no padding (`PLAYGLIDE_INGEST_INLINE_SIGNATURE=1`).
+    /// `CVPixelBufferFillExtendedPixels` when rows have no padding (`PLAYGLIDE_INGEST_INLINE_SIGNATURE=0` opts out).
     static var inlineSignatureEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_INGEST_INLINE_SIGNATURE"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_INGEST_INLINE_SIGNATURE"] != "0"
     }
 
     enum Mode: String, Sendable {

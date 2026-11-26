@@ -4,9 +4,9 @@ import Foundation
 
 actor PipelineSession {
     /// Run `PipelineSession` and `FrameProcessor` actors on dedicated `.userInteractive` serial queues
-    /// to prevent QoS dips between capture callbacks and presentation (`PLAYGLIDE_PIPELINE_UI_QOS=1`).
+    /// to prevent QoS dips between capture callbacks and presentation (`PLAYGLIDE_PIPELINE_UI_QOS=0` opts out).
     static var userInteractiveQoSEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_PIPELINE_UI_QOS"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_PIPELINE_UI_QOS"] != "0"
     }
 
     let generation: UUID
