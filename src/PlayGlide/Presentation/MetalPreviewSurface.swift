@@ -1696,6 +1696,7 @@ struct MetalPreviewSurface: NSViewRepresentable {
     var roundedCorners = false
     var hdr10Active = false
     var onPointerMove: (@MainActor () -> Void)?
+    var onDisplayIDChange: (@MainActor (Int?) -> Void)?
     func makeCoordinator() -> PreviewCoordinator { PreviewCoordinator(mailbox: mailbox) }
     func makeNSView(context: Context) -> MetalPreviewView {
         let view = MetalPreviewView(frame: .zero)
@@ -1709,6 +1710,7 @@ struct MetalPreviewSurface: NSViewRepresentable {
         view.onDisplayEDRChange = { [weak coordinator = context.coordinator] headroom in
             coordinator?.setDisplayEDRHeadroom(headroom)
         }
+        view.onDisplayIDChange = onDisplayIDChange
         updateNSView(view, context: context)
         return view
     }
@@ -1717,6 +1719,8 @@ struct MetalPreviewSurface: NSViewRepresentable {
             context.coordinator.attach(layer)
         }
         view.onPointerMove = onPointerMove
+        view.onDisplayIDChange = onDisplayIDChange
+        view.onDisplayIDChange?(view.displayID)
         view.setRoundedCorners(roundedCorners)
         view.setHDR10Active(hdr10Active)
         view.setImmersive(immersive)
@@ -1729,18 +1733,40 @@ struct MetalPreviewSurface: NSViewRepresentable {
     static func dismantleNSView(_ nsView: MetalPreviewView, coordinator: PreviewCoordinator) {
         nsView.onScreenChange = nil
         nsView.onDisplayEDRChange = nil
+        let displayChange = nsView.onDisplayIDChange
+        nsView.onDisplayIDChange = nil
+        displayChange?(nil)
         nsView.stopObservingWindow()
         coordinator.stop()
     }
 }
 
+struct SystemDisplayHDRDescriptor: Equatable, Sendable {
+    let displayID: Int
+    let hasHDRModes: Bool
+    let preferHDRModes: Bool
+    let canToggleHDR: Bool
+}
+
 @MainActor
 final class SystemDisplayHDRController {
     static let shared = SystemDisplayHDRController()
-    private var managedDisplayIDs: Set<Int> = []
+
+    /// Restrict automatic HDR toggling to the exact display hosting the preview window
+    /// (`PLAYGLIDE_STRICT_HDR_DISPLAY=0` restores legacy first-HDR-display fallback for A/B).
+    nonisolated static var strictDisplayMatchingEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_STRICT_HDR_DISPLAY"] != "0"
+    }
+
+    private(set) var managedDisplayIDs: Set<Int> = []
     private var bundleLoaded = false
+    private let strictDisplayMatching: Bool
+    private var listDisplays: (@MainActor () -> [SystemDisplayHDRDescriptor])?
+    private var setPreferHDRModes: (@MainActor (Int, Bool) -> Void)?
+    private var fallbackDisplayID: (@MainActor () -> Int?)?
 
     private init() {
+        self.strictDisplayMatching = Self.strictDisplayMatchingEnabled
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { _ in
@@ -1750,14 +1776,26 @@ final class SystemDisplayHDRController {
         }
     }
 
-    func update(hdrSessionActive: Bool, policy: SystemHDRPolicy, immersive: Bool) {
+    init(
+        strictDisplayMatching: Bool = SystemDisplayHDRController.strictDisplayMatchingEnabled,
+        listDisplays: @escaping @MainActor () -> [SystemDisplayHDRDescriptor],
+        setPreferHDRModes: @escaping @MainActor (Int, Bool) -> Void,
+        fallbackDisplayID: @escaping @MainActor () -> Int? = { nil }
+    ) {
+        self.strictDisplayMatching = strictDisplayMatching
+        self.listDisplays = listDisplays
+        self.setPreferHDRModes = setPreferHDRModes
+        self.fallbackDisplayID = fallbackDisplayID
+    }
+
+    func update(hdrSessionActive: Bool, policy: SystemHDRPolicy, immersive: Bool, displayID: Int? = nil) {
         guard policy != .manual else {
             restoreManagedDisplays()
             return
         }
         let shouldEnable = hdrSessionActive && (policy == .session || (policy == .fullscreen && immersive))
         if shouldEnable {
-            enableHDROnActiveDisplay()
+            enableHDR(on: displayID)
         } else {
             restoreManagedDisplays()
         }
@@ -1775,51 +1813,88 @@ final class SystemDisplayHDRController {
         return (manager.value(forKey: "displays") as? [NSObject]) ?? []
     }
 
+    private func currentDisplays() -> [SystemDisplayHDRDescriptor] {
+        if let listDisplays { return listDisplays() }
+        let setSelector = NSSelectorFromString("setPreferHDRModes:")
+        return loadMonitorPanel().compactMap { display in
+            guard let id = display.value(forKey: "displayID") as? Int else { return nil }
+            return SystemDisplayHDRDescriptor(
+                displayID: id,
+                hasHDRModes: (display.value(forKey: "hasHDRModes") as? Bool) == true,
+                preferHDRModes: (display.value(forKey: "preferHDRModes") as? Bool) == true,
+                canToggleHDR: display.responds(to: setSelector)
+            )
+        }
+    }
+
+    private func applyPreferHDRModes(_ enabled: Bool, to displayID: Int) {
+        if let setPreferHDRModes {
+            setPreferHDRModes(displayID, enabled)
+            return
+        }
+        let setSelector = NSSelectorFromString("setPreferHDRModes:")
+        guard
+            let target = loadMonitorPanel().first(where: {
+                ($0.value(forKey: "displayID") as? Int) == displayID
+                    && ($0.value(forKey: "hasHDRModes") as? Bool) == true
+                    && $0.responds(to: setSelector)
+            })
+        else { return }
+        target.setValue(enabled, forKey: "preferHDRModes")
+    }
+
     private func activeScreenDisplayID() -> Int? {
+        if let fallbackDisplayID { return fallbackDisplayID() }
         let window =
             NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible })
         let screen = window?.screen ?? NSScreen.main
         return (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.intValue
     }
 
-    private func enableHDROnActiveDisplay() {
-        let displays = loadMonitorPanel()
-        guard !displays.isEmpty else { return }
-        let preferredID = activeScreenDisplayID()
-        let setSelector = NSSelectorFromString("setPreferHDRModes:")
-        let target =
-            displays.first(where: {
-                (($0.value(forKey: "displayID") as? Int) == preferredID)
-                    && (($0.value(forKey: "hasHDRModes") as? Bool) == true)
-                    && $0.responds(to: setSelector)
+    private func enableHDR(on previewDisplayID: Int?) {
+        let displays = currentDisplays()
+        let target: SystemDisplayHDRDescriptor?
+        if strictDisplayMatching {
+            guard let previewDisplayID else {
+                restoreManagedDisplays(excluding: nil, using: displays)
+                return
+            }
+            restoreManagedDisplays(excluding: previewDisplayID, using: displays)
+            target = displays.first(where: {
+                $0.displayID == previewDisplayID && $0.hasHDRModes && $0.canToggleHDR
             })
-            ?? displays.first(where: {
-                (($0.value(forKey: "hasHDRModes") as? Bool) == true)
-                    && $0.responds(to: setSelector)
-            })
-        guard let target, let id = target.value(forKey: "displayID") as? Int else { return }
-        let current = (target.value(forKey: "preferHDRModes") as? Bool) ?? false
-        if !current {
-            managedDisplayIDs.insert(id)
-            target.setValue(true, forKey: "preferHDRModes")
+        } else {
+            let preferredID = previewDisplayID ?? activeScreenDisplayID()
+            let candidate =
+                displays.first(where: {
+                    $0.displayID == preferredID && $0.hasHDRModes && $0.canToggleHDR
+                })
+                ?? displays.first(where: { $0.hasHDRModes && $0.canToggleHDR })
+            restoreManagedDisplays(excluding: candidate?.displayID, using: displays)
+            target = candidate
+        }
+        guard let target else { return }
+        if !target.preferHDRModes {
+            managedDisplayIDs.insert(target.displayID)
+            applyPreferHDRModes(true, to: target.displayID)
         }
     }
 
     func restoreManagedDisplays() {
+        restoreManagedDisplays(excluding: nil, using: nil)
+    }
+
+    private func restoreManagedDisplays(excluding keepID: Int?, using cachedDisplays: [SystemDisplayHDRDescriptor]?) {
         guard !managedDisplayIDs.isEmpty else { return }
-        let displays = loadMonitorPanel()
-        let setSelector = NSSelectorFromString("setPreferHDRModes:")
-        for display in displays {
-            guard let id = display.value(forKey: "displayID") as? Int,
-                managedDisplayIDs.contains(id),
-                (display.value(forKey: "hasHDRModes") as? Bool) == true,
-                display.responds(to: setSelector)
-            else { continue }
-            if (display.value(forKey: "preferHDRModes") as? Bool) == true {
-                display.setValue(false, forKey: "preferHDRModes")
+        let toRestore = keepID.map { managedDisplayIDs.subtracting([$0]) } ?? managedDisplayIDs
+        guard !toRestore.isEmpty else { return }
+        let displays = cachedDisplays ?? currentDisplays()
+        for display in displays where toRestore.contains(display.displayID) {
+            if display.hasHDRModes && display.canToggleHDR && display.preferHDRModes {
+                applyPreferHDRModes(false, to: display.displayID)
             }
         }
-        managedDisplayIDs.removeAll()
+        managedDisplayIDs.subtract(toRestore)
     }
 }
 
@@ -1835,7 +1910,11 @@ final class MetalPreviewView: NSView {
     var onDrawableSizeChange: ((VideoSize) -> Void)?
     var onScreenChange: (@MainActor (Float) -> Void)?
     var onDisplayEDRChange: (@MainActor (CGFloat) -> Void)?
+    var onDisplayIDChange: (@MainActor (Int?) -> Void)?
     var onPointerMove: (@MainActor () -> Void)?
+    var displayID: Int? {
+        (window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.intValue
+    }
     var maximumFPS: Float {
         let rate = window?.screen?.maximumFramesPerSecond ?? 120
         return rate > 0 ? Float(rate) : 60
@@ -1918,6 +1997,7 @@ final class MetalPreviewView: NSView {
     }
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         stopObservingWindow()
+        if newWindow == nil { onDisplayIDChange?(nil) }
         super.viewWillMove(toWindow: newWindow)
     }
     override func viewDidMoveToWindow() {
@@ -1934,6 +2014,7 @@ final class MetalPreviewView: NSView {
                 self, selector: #selector(screenParametersDidChange(_:)),
                 name: NSApplication.didChangeScreenParametersNotification, object: nil)
         }
+        onDisplayIDChange?(displayID)
         onScreenChange?(maximumFPS)
         syncLayerColorContainer()
         resizeSurface()
@@ -1945,11 +2026,13 @@ final class MetalPreviewView: NSView {
         NotificationCenter.default.removeObserver(self, name: NSWindow.didChangeScreenNotification, object: window)
     }
     @objc private func windowDidChangeScreen(_ notification: Notification) {
+        onDisplayIDChange?(displayID)
         onScreenChange?(maximumFPS)
         syncLayerColorContainer()
         resizeSurface()
     }
     @objc private func screenParametersDidChange(_ notification: Notification) {
+        onDisplayIDChange?(displayID)
         syncLayerColorContainer()
     }
     override func viewDidChangeBackingProperties() {

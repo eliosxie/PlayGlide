@@ -86,6 +86,7 @@ final class WorkspaceModel: ObservableObject {
     private var activity: (any NSObjectProtocol)?
     private let windowPicker = WindowSharingPicker()
     private var windowSource: WindowCaptureSource?
+    private var previewDisplayID: Int?
 
     init(
         defaults: UserDefaults? = nil,
@@ -509,12 +510,20 @@ final class WorkspaceModel: ObservableObject {
         case .automatic: return statistics.detectedHDR10
         }
     }
+    func setPreviewDisplayID(_ displayID: Int?) {
+        let changed = previewDisplayID != displayID
+        previewDisplayID = displayID
+        if changed || effectiveHDR10Active {
+            syncSystemHDRMode()
+        }
+    }
     func syncSystemHDRMode() {
         guard defaults === UserDefaults.standard else { return }
         SystemDisplayHDRController.shared.update(
             hdrSessionActive: effectiveHDR10Active,
             policy: draft.systemHDRPolicy,
-            immersive: immersive
+            immersive: immersive,
+            displayID: previewDisplayID
         )
     }
     func stop() {
