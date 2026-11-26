@@ -121,6 +121,7 @@ final class PreviewImageRenderer {
     private var hybridMotionDetailFrameID: UUID?
     private var hybridMotionDetailHasForward = false
     private(set) var selectMotionDispatches = 0
+    private(set) var precomputedMotionUses = 0
     private var spatial: SpatialUpscaler?
     private var texture: (any MTLTexture)?
     private var key: Key?
@@ -745,78 +746,96 @@ final class PreviewImageRenderer {
         else { return false }
         var motionView: CVMetalTexture?
         var forwardMotionView: CVMetalTexture?
-        if let backward = recipe.motionBackward {
-            backward.withUnsafeBuffer { pixel in
-                guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_TwoComponent16Half else { return }
-                let w = CVPixelBufferGetWidth(pixel)
-                let h = CVPixelBufferGetHeight(pixel)
-                motionView = mapTexture(pixel, cache: textureCache, format: .rg16Float, width: w, height: h, plane: 0)
-            }
-        }
-        if let forward = recipe.motionForward {
-            forward.withUnsafeBuffer { pixel in
-                guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_TwoComponent16Half else { return }
-                let w = CVPixelBufferGetWidth(pixel)
-                let h = CVPixelBufferGetHeight(pixel)
-                forwardMotionView = mapTexture(
-                    pixel, cache: textureCache, format: .rg16Float, width: w, height: h, plane: 0)
-            }
-        }
-        let motionTexture = motionView.flatMap { CVMetalTextureGetTexture($0) }
-        let forwardMotionTexture = forwardMotionView.flatMap { CVMetalTextureGetTexture($0) }
+        var activeMotionDetailTexture: (any MTLTexture)?
         var useMotion = false
-        if let motionTexture {
-            if hybridMotionDetailTexture?.width != recipe.selectSize.width
-                || hybridMotionDetailTexture?.height != recipe.selectSize.height
-            {
-                let desc = MTLTextureDescriptor.texture2DDescriptor(
-                    pixelFormat: .rgba16Float, width: recipe.selectSize.width, height: recipe.selectSize.height,
-                    mipmapped: false)
-                desc.storageMode = .private
-                desc.usage = [.shaderRead, .shaderWrite]
-                hybridMotionDetailTexture = device.makeTexture(descriptor: desc)
-                hybridMotionDetailFrameID = nil
+        if let precomputed = recipe.precomputedMotionDetail,
+            precomputed.isValid(forDevice: device.registryID)
+        {
+            command.encodeWaitForEvent(precomputed.event, value: precomputed.signalValue)
+            command.addCompletedHandler { _ in withExtendedLifetime(precomputed) {} }
+            activeMotionDetailTexture = precomputed.texture
+            precomputedMotionUses += 1
+            useMotion = true
+        } else {
+            if let backward = recipe.motionBackward {
+                backward.withUnsafeBuffer { pixel in
+                    guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_TwoComponent16Half else {
+                        return
+                    }
+                    let w = CVPixelBufferGetWidth(pixel)
+                    let h = CVPixelBufferGetHeight(pixel)
+                    motionView = mapTexture(
+                        pixel, cache: textureCache, format: .rg16Float, width: w, height: h, plane: 0)
+                }
             }
-            let hasForward = forwardMotionTexture != nil
-            if FrameMailbox.fastPathEnabled, hybridMotionDetailTexture != nil,
-                hybridMotionDetailFrameID == frame.id, hybridMotionDetailHasForward == hasForward
-            {
-                useMotion = true
-            } else if let detailTex = hybridMotionDetailTexture,
-                let selectPipeline = try selectMotionPipeline(
-                    hasForwardMotion: hasForward, sampleMid: recipe.selectSize != recipe.lowSize),
-                let select = command.makeComputeCommandEncoder()
-            {
-                let hdrBits = recipe.isHDR10PQ ? (Self.hdr10SoftBlackToeEnabled ? 2 : 1) : 0
-                let motionFlags =
-                    hdrBits | (HybridInterpolator.hudDehaloEnabled ? 8 : 0)
-                    | (HybridInterpolator.shaderSafeFiniteEnabled ? 16 : 0)
-                var weights = SIMD4<Float>(
-                    recipe.phase, recipe.restoresStaticPixels ? 1 : 0, recipe.sharpenStrength,
-                    Float(recipe.motionSize.width))
-                var motionParams = SIMD4<Float>(
-                    1 / Float(recipe.motionSize.width), 1 / Float(recipe.motionSize.height),
-                    Float(recipe.motionSize.width) / Float(recipe.forwardMotionSize.width),
-                    Float(motionFlags))
-                select.setComputePipelineState(selectPipeline)
-                select.setTexture(lowA.luma, index: 0)
-                select.setTexture(lowA.chroma, index: 1)
-                select.setTexture(lowB.luma, index: 2)
-                select.setTexture(lowB.chroma, index: 3)
-                select.setTexture(lowMid.luma, index: 4)
-                select.setTexture(motionTexture, index: 5)
-                select.setTexture(detailTex, index: 6)
-                if let forwardMotionTexture { select.setTexture(forwardMotionTexture, index: 7) }
-                select.setBytes(&weights, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
-                select.setBytes(&motionParams, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
-                select.dispatchThreads(
-                    MTLSize(width: recipe.selectSize.width, height: recipe.selectSize.height, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
-                select.endEncoding()
-                hybridMotionDetailFrameID = frame.id
-                hybridMotionDetailHasForward = hasForward
-                selectMotionDispatches += 1
-                useMotion = true
+            if let forward = recipe.motionForward {
+                forward.withUnsafeBuffer { pixel in
+                    guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_TwoComponent16Half else {
+                        return
+                    }
+                    let w = CVPixelBufferGetWidth(pixel)
+                    let h = CVPixelBufferGetHeight(pixel)
+                    forwardMotionView = mapTexture(
+                        pixel, cache: textureCache, format: .rg16Float, width: w, height: h, plane: 0)
+                }
+            }
+            let motionTexture = motionView.flatMap { CVMetalTextureGetTexture($0) }
+            let forwardMotionTexture = forwardMotionView.flatMap { CVMetalTextureGetTexture($0) }
+            if let motionTexture {
+                if hybridMotionDetailTexture?.width != recipe.selectSize.width
+                    || hybridMotionDetailTexture?.height != recipe.selectSize.height
+                {
+                    let desc = MTLTextureDescriptor.texture2DDescriptor(
+                        pixelFormat: .rgba16Float, width: recipe.selectSize.width, height: recipe.selectSize.height,
+                        mipmapped: false)
+                    desc.storageMode = .private
+                    desc.usage = [.shaderRead, .shaderWrite]
+                    hybridMotionDetailTexture = device.makeTexture(descriptor: desc)
+                    hybridMotionDetailFrameID = nil
+                }
+                let hasForward = forwardMotionTexture != nil
+                if FrameMailbox.fastPathEnabled, hybridMotionDetailTexture != nil,
+                    hybridMotionDetailFrameID == frame.id, hybridMotionDetailHasForward == hasForward
+                {
+                    activeMotionDetailTexture = hybridMotionDetailTexture
+                    useMotion = true
+                } else if let detailTex = hybridMotionDetailTexture,
+                    let selectPipeline = try selectMotionPipeline(
+                        hasForwardMotion: hasForward, sampleMid: recipe.selectSize != recipe.lowSize),
+                    let select = command.makeComputeCommandEncoder()
+                {
+                    let hdrBits = recipe.isHDR10PQ ? (Self.hdr10SoftBlackToeEnabled ? 2 : 1) : 0
+                    let motionFlags =
+                        hdrBits | (HybridInterpolator.hudDehaloEnabled ? 8 : 0)
+                        | (HybridInterpolator.shaderSafeFiniteEnabled ? 16 : 0)
+                    var weights = SIMD4<Float>(
+                        recipe.phase, recipe.restoresStaticPixels ? 1 : 0, recipe.sharpenStrength,
+                        Float(recipe.motionSize.width))
+                    var motionParams = SIMD4<Float>(
+                        1 / Float(recipe.motionSize.width), 1 / Float(recipe.motionSize.height),
+                        Float(recipe.motionSize.width) / Float(recipe.forwardMotionSize.width),
+                        Float(motionFlags))
+                    select.setComputePipelineState(selectPipeline)
+                    select.setTexture(lowA.luma, index: 0)
+                    select.setTexture(lowA.chroma, index: 1)
+                    select.setTexture(lowB.luma, index: 2)
+                    select.setTexture(lowB.chroma, index: 3)
+                    select.setTexture(lowMid.luma, index: 4)
+                    select.setTexture(motionTexture, index: 5)
+                    select.setTexture(detailTex, index: 6)
+                    if let forwardMotionTexture { select.setTexture(forwardMotionTexture, index: 7) }
+                    select.setBytes(&weights, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+                    select.setBytes(&motionParams, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
+                    select.dispatchThreads(
+                        MTLSize(width: recipe.selectSize.width, height: recipe.selectSize.height, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                    select.endEncoding()
+                    hybridMotionDetailFrameID = frame.id
+                    hybridMotionDetailHasForward = hasForward
+                    selectMotionDispatches += 1
+                    activeMotionDetailTexture = detailTex
+                    useMotion = true
+                }
             }
         }
         guard let pipeline = try hybridRenderPipeline(for: destination.pixelFormat, hasMotion: useMotion) else {
@@ -864,7 +883,7 @@ final class PreviewImageRenderer {
         encoder.setFragmentTexture(lowB.chroma, index: 7)
         encoder.setFragmentTexture(lowMid.luma, index: 8)
         encoder.setFragmentTexture(lowMid.chroma, index: 9)
-        if useMotion, let detailTex = hybridMotionDetailTexture {
+        if useMotion, let detailTex = activeMotionDetailTexture {
             encoder.setFragmentTexture(detailTex, index: 10)
         }
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<HybridPreviewUniforms>.stride, index: 0)

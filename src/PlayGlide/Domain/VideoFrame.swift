@@ -1,6 +1,7 @@
 import CoreMedia
 import CoreVideo
 import Foundation
+import Metal
 import QuartzCore
 import Synchronization
 
@@ -29,6 +30,122 @@ struct VideoFrame: Sendable {
     }
 }
 
+/// Bounded 3-slot private Metal texture pool + shared event for precomputing hybrid `selectMotion`
+/// off the display link without passing `CVMetalTexture` across threads.
+final class MotionDetailSlotPool: @unchecked Sendable {
+    static let capacity = 3
+
+    private struct Slot {
+        let texture: any MTLTexture
+        var inUse = false
+    }
+
+    private struct State {
+        var slots: [Slot] = []
+        var nextEventValue: UInt64 = 0
+        var epoch: UInt64 = 1
+        var exhaustionFallbacks = 0
+    }
+
+    let deviceRegistryID: UInt64
+    let selectSize: VideoSize
+    let sharedEvent: any MTLSharedEvent
+    private let device: any MTLDevice
+    private let state = Mutex(State())
+
+    init?(device: any MTLDevice, selectSize: VideoSize) {
+        guard selectSize.width > 0, selectSize.height > 0, let event = device.makeSharedEvent() else { return nil }
+        self.device = device
+        self.deviceRegistryID = device.registryID
+        self.selectSize = selectSize
+        self.sharedEvent = event
+    }
+
+    func acquire(hasForward: Bool) -> PrecomputedMotionDetail? {
+        let acquired: (index: Int, texture: any MTLTexture, signalValue: UInt64, epoch: UInt64)? = state.withLock {
+            state in
+            if let existing = state.slots.firstIndex(where: { !$0.inUse }) {
+                state.slots[existing].inUse = true
+                state.nextEventValue += 1
+                return (existing, state.slots[existing].texture, state.nextEventValue, state.epoch)
+            }
+            guard state.slots.count < Self.capacity else {
+                state.exhaustionFallbacks += 1
+                return nil
+            }
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba16Float, width: selectSize.width, height: selectSize.height, mipmapped: false)
+            desc.storageMode = .private
+            desc.usage = [.shaderRead, .shaderWrite]
+            guard let texture = device.makeTexture(descriptor: desc) else {
+                state.exhaustionFallbacks += 1
+                return nil
+            }
+            let index = state.slots.count
+            state.slots.append(Slot(texture: texture, inUse: true))
+            state.nextEventValue += 1
+            return (index, texture, state.nextEventValue, state.epoch)
+        }
+        guard let acquired else { return nil }
+        return PrecomputedMotionDetail(
+            pool: self, slotIndex: acquired.index, texture: acquired.texture,
+            event: sharedEvent, signalValue: acquired.signalValue, epoch: acquired.epoch,
+            hasForward: hasForward, deviceRegistryID: deviceRegistryID)
+    }
+
+    func release(slotIndex: Int) {
+        state.withLock { state in
+            guard state.slots.indices.contains(slotIndex) else { return }
+            state.slots[slotIndex].inUse = false
+        }
+    }
+
+    func invalidateAll() {
+        state.withLock { $0.epoch &+= 1 }
+    }
+
+    func isValid(epoch: UInt64) -> Bool {
+        state.withLock { $0.epoch == epoch }
+    }
+
+    var exhaustionFallbacks: Int { state.withLock(\.exhaustionFallbacks) }
+    var inUseCount: Int { state.withLock { $0.slots.filter(\.inUse).count } }
+}
+
+/// Ownership token for one precomputed `selectMotion` texture slot; automatically recycles the slot on deinit
+/// after both producer and any consumer GPU command buffers have completed.
+final class PrecomputedMotionDetail: @unchecked Sendable {
+    private let pool: MotionDetailSlotPool
+    private let slotIndex: Int
+    let texture: any MTLTexture
+    let event: any MTLSharedEvent
+    let signalValue: UInt64
+    let epoch: UInt64
+    let hasForward: Bool
+    let deviceRegistryID: UInt64
+
+    init(
+        pool: MotionDetailSlotPool, slotIndex: Int, texture: any MTLTexture,
+        event: any MTLSharedEvent, signalValue: UInt64, epoch: UInt64,
+        hasForward: Bool, deviceRegistryID: UInt64
+    ) {
+        self.pool = pool
+        self.slotIndex = slotIndex
+        self.texture = texture
+        self.event = event
+        self.signalValue = signalValue
+        self.epoch = epoch
+        self.hasForward = hasForward
+        self.deviceRegistryID = deviceRegistryID
+    }
+
+    deinit { pool.release(slotIndex: slotIndex) }
+
+    func isValid(forDevice registryID: UInt64) -> Bool {
+        deviceRegistryID == registryID && pool.isValid(epoch: epoch)
+    }
+}
+
 /// Immutable inputs for fusing hybrid midpoint composition directly into the Metal preview pass.
 /// Eliminates the 12.4 MB 4K 420v intermediate buffer, CPU waitUntilCompleted(), and 8-bit quantization round-trip.
 struct HybridPreviewRecipe: Sendable {
@@ -48,6 +165,35 @@ struct HybridPreviewRecipe: Sendable {
     let forwardMotionSize: VideoSize
     let selectSize: VideoSize
     let isHDR10PQ: Bool
+    let precomputedMotionDetail: PrecomputedMotionDetail?
+
+    init(
+        previous: CVReadOnlyPixelBuffer, current: CVReadOnlyPixelBuffer,
+        previousLow: CVReadOnlyPixelBuffer, currentLow: CVReadOnlyPixelBuffer,
+        midpoint: CVReadOnlyPixelBuffer, motionBackward: CVReadOnlyPixelBuffer?,
+        motionForward: CVReadOnlyPixelBuffer?, phase: Float, sharpenStrength: Float,
+        restoresStaticPixels: Bool, inputSize: VideoSize, lowSize: VideoSize,
+        motionSize: VideoSize, forwardMotionSize: VideoSize, selectSize: VideoSize,
+        isHDR10PQ: Bool, precomputedMotionDetail: PrecomputedMotionDetail? = nil
+    ) {
+        self.previous = previous
+        self.current = current
+        self.previousLow = previousLow
+        self.currentLow = currentLow
+        self.midpoint = midpoint
+        self.motionBackward = motionBackward
+        self.motionForward = motionForward
+        self.phase = phase
+        self.sharpenStrength = sharpenStrength
+        self.restoresStaticPixels = restoresStaticPixels
+        self.inputSize = inputSize
+        self.lowSize = lowSize
+        self.motionSize = motionSize
+        self.forwardMotionSize = forwardMotionSize
+        self.selectSize = selectSize
+        self.isHDR10PQ = isHDR10PQ
+        self.precomputedMotionDetail = precomputedMotionDetail
+    }
 }
 
 struct PresentationFrame: Sendable {

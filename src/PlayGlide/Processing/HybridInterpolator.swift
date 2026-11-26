@@ -99,6 +99,11 @@ final class HybridInterpolator {
     static var shaderSafeFiniteEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_SHADER_SAFE_FINITE"] != "0"
     }
+    /// Precompute hybrid `selectMotion` asynchronously into a bounded 3-slot Metal texture pool synced via
+    /// `MTLSharedEvent` so the display link callback skips compute work (`PLAYGLIDE_PRECOMPUTE_MOTION_DETAIL=1`).
+    static var precomputeMotionDetailEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_PRECOMPUTE_MOTION_DETAIL"] == "1"
+    }
     static let spatialMovingDetailEnabled =
         ProcessInfo.processInfo.environment["PLAYGLIDE_SPATIAL_MOVING_DETAIL"] == "1"
 
@@ -131,6 +136,9 @@ final class HybridInterpolator {
     private var mergeNV12Out2x: any MTLComputePipelineState { pipelines.mergeNV12Out2x }
     private var mergeDetailNV12Out2x: any MTLComputePipelineState { pipelines.mergeDetailNV12Out2x }
     private var motionDetailTexture: (any MTLTexture)?
+    private var motionDetailPool: MotionDetailSlotPool?
+    var precomputedMotionPoolExhaustions: Int { motionDetailPool?.exhaustionFallbacks ?? 0 }
+    var precomputedMotionInUseCount: Int { motionDetailPool?.inUseCount ?? 0 }
     private let cache: CVMetalTextureCache
     private let transfer: VTPixelTransferSession
     private let sourcePool: PixelBufferPool
@@ -363,6 +371,7 @@ final class HybridInterpolator {
         cachedLow.removeAll()
         cachedMotionLow.removeAll()
         cachedForwardLow.removeAll()
+        motionDetailPool?.invalidateAll()
         CVMetalTextureCacheFlush(cache, 0)
     }
 
@@ -578,12 +587,99 @@ final class HybridInterpolator {
         }
     }
 
+    private final class RetainedMotionInputs: @unchecked Sendable {
+        let items: [Any]
+        init(_ items: [Any]) { self.items = items }
+    }
+
+    /// Asynchronously encodes `selectMotion` into a bounded 3-slot private texture pool synced via `MTLSharedEvent`
+    /// without blocking the caller or passing `CVMetalTexture` across threads. Returns `nil` if the pool is full
+    /// or mapping fails so the preview pass falls back transparently to inline `previewSelectMotion`.
+    func precomputeMotionDetail(
+        previousLow: CVReadOnlyPixelBuffer, currentLow: CVReadOnlyPixelBuffer,
+        midpoint: CVReadOnlyPixelBuffer, phase: Float, motionField: MotionFields,
+        isHDR10PQ: Bool, sharpenStrength: Float? = nil
+    ) -> PrecomputedMotionDetail? {
+        guard detailMode.usesMotion else { return nil }
+        if motionDetailPool == nil {
+            motionDetailPool = MotionDetailSlotPool(device: device, selectSize: selectSize)
+        }
+        guard let pool = motionDetailPool else { return nil }
+        guard let lowA = try? planes(previousLow, size: low),
+            let lowB = try? planes(currentLow, size: low),
+            let lowMid = try? planes(midpoint, size: low)
+        else { return nil }
+        var motionView: CVMetalTexture?
+        var forwardMotionView: CVMetalTexture?
+        motionField.backward.withUnsafeBuffer { pixel in
+            guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_TwoComponent16Half else { return }
+            let size = VideoSize(width: CVPixelBufferGetWidth(pixel), height: CVPixelBufferGetHeight(pixel))
+            motionView = try? texture(pixel, format: .rg16Float, size: size)
+        }
+        if let forward = motionField.forward {
+            forward.withUnsafeBuffer { pixel in
+                guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_TwoComponent16Half else { return }
+                let size = VideoSize(width: CVPixelBufferGetWidth(pixel), height: CVPixelBufferGetHeight(pixel))
+                forwardMotionView = try? texture(pixel, format: .rg16Float, size: size)
+            }
+        }
+        guard let motionTexture = motionView.flatMap({ CVMetalTextureGetTexture($0) }) else { return nil }
+        let forwardMotionTexture = forwardMotionView.flatMap { CVMetalTextureGetTexture($0) }
+        guard let token = pool.acquire(hasForward: forwardMotionTexture != nil) else { return nil }
+        guard let command = queue.makeCommandBuffer(), let select = command.makeComputeCommandEncoder() else {
+            return nil
+        }
+        let sampledMid = selectSize != low
+        if sampledMid {
+            select.setComputePipelineState(
+                forwardMotionTexture != nil ? selectMotionBidirSampleMid : selectMotionSampleMid)
+        } else {
+            select.setComputePipelineState(forwardMotionTexture != nil ? selectMotionBidir : selectMotion)
+        }
+        let hdrBits = isHDR10PQ ? (PreviewImageRenderer.hdr10SoftBlackToeEnabled ? 2 : 1) : 0
+        let motionFlags =
+            hdrBits | (Self.hudDehaloEnabled ? 8 : 0) | (Self.shaderSafeFiniteEnabled ? 16 : 0)
+        var weights = SIMD4<Float>(
+            phase, restoresStaticPixels ? 1 : 0, sharpenStrength ?? detailMode.sharpenStrength,
+            Float(motionSize.width))
+        var motionParams = SIMD4<Float>(
+            1 / Float(motionSize.width), 1 / Float(motionSize.height),
+            Float(motionSize.width) / Float(forwardMotionSize.width),
+            Float(motionFlags))
+        select.setTexture(lowA.luma, index: 0)
+        select.setTexture(lowA.chroma, index: 1)
+        select.setTexture(lowB.luma, index: 2)
+        select.setTexture(lowB.chroma, index: 3)
+        select.setTexture(lowMid.luma, index: 4)
+        select.setTexture(motionTexture, index: 5)
+        select.setTexture(token.texture, index: 6)
+        if let forwardMotionTexture { select.setTexture(forwardMotionTexture, index: 7) }
+        select.setBytes(&weights, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        select.setBytes(&motionParams, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
+        select.dispatchThreads(
+            MTLSize(width: selectSize.width, height: selectSize.height, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        select.endEncoding()
+        command.encodeSignalEvent(token.event, value: token.signalValue)
+        var retainedList: [Any] = [
+            token, previousLow, currentLow, midpoint, motionField.backward, lowA, lowB, lowMid,
+        ]
+        if let motionView { retainedList.append(motionView) }
+        if let forwardMotionView { retainedList.append(forwardMotionView) }
+        if let forward = motionField.forward { retainedList.append(forward) }
+        let retained = RetainedMotionInputs(retainedList)
+        command.addCompletedHandler { _ in withExtendedLifetime(retained) {} }
+        command.commit()
+        return token
+    }
+
     /// Builds a read-only recipe so `PreviewImageRenderer` can execute `selectMotion` and midpoint merge
     /// directly into the 10-bit preview drawable without an intermediate 4K 420v pass or CPU wait.
     func makePreviewRecipe(
         previous: VideoFrame, current: VideoFrame, previousLow: CVReadOnlyPixelBuffer,
         currentLow: CVReadOnlyPixelBuffer, midpoint: CVReadOnlyPixelBuffer, phase: Float,
-        motionField: MotionFields? = nil, sharpenStrength: Float? = nil
+        motionField: MotionFields? = nil, sharpenStrength: Float? = nil,
+        precomputeMotionDetail: Bool = HybridInterpolator.precomputeMotionDetailEnabled
     ) -> HybridPreviewRecipe? {
         func isDirectNV12(_ buffer: CVReadOnlyPixelBuffer) -> (valid: Bool, hdr10: Bool) {
             buffer.withUnsafeBuffer { pixel in
@@ -618,6 +714,15 @@ final class HybridInterpolator {
         let prevCheck = isDirectNV12(previous.pixelBuffer)
         let currCheck = isDirectNV12(current.pixelBuffer)
         guard prevCheck.valid, currCheck.valid, prevCheck.hdr10 == currCheck.hdr10 else { return nil }
+        let precomputed: PrecomputedMotionDetail?
+        if precomputeMotionDetail, let motionField {
+            precomputed = self.precomputeMotionDetail(
+                previousLow: previousLow, currentLow: currentLow, midpoint: midpoint,
+                phase: phase, motionField: motionField, isHDR10PQ: prevCheck.hdr10,
+                sharpenStrength: sharpenStrength)
+        } else {
+            precomputed = nil
+        }
         return HybridPreviewRecipe(
             previous: previous.pixelBuffer, current: current.pixelBuffer,
             previousLow: previousLow, currentLow: currentLow, midpoint: midpoint,
@@ -625,7 +730,8 @@ final class HybridInterpolator {
             phase: phase, sharpenStrength: sharpenStrength ?? detailMode.sharpenStrength,
             restoresStaticPixels: restoresStaticPixels,
             inputSize: input, lowSize: low, motionSize: motionSize, forwardMotionSize: forwardMotionSize,
-            selectSize: selectSize, isHDR10PQ: prevCheck.hdr10)
+            selectSize: selectSize, isHDR10PQ: prevCheck.hdr10,
+            precomputedMotionDetail: precomputed)
     }
 
     /// Upscales VT's midpoint, restores unchanged source pixels, and optionally transfers native high-frequency
@@ -1098,14 +1204,41 @@ final class HybridInterpolator {
             if (!nv12) return value;
             return nv12Color(value.r, chroma.sample(linearSampler, uv + offset).rg);
         }
+        inline half3 decodeLowYCbCr(half y, half2 cbcr, bool bt2020, bool softToe) {
+            if (bt2020) {
+                half yPos = max(half(0.0), y);
+                half yAnchored;
+                half2 cBoost;
+                if (softToe) {
+                    half t = saturate(yPos * half(1.0 / 0.08));
+                    yAnchored = yPos * mix(half(0.25), half(1.0), t);
+                    cBoost = cbcr * mix(half(0.75), half(1.12), t);
+                } else {
+                    yAnchored = max(half(0.0), (yPos - half(0.042)) * half(1.0 / 0.958));
+                    cBoost = cbcr * half(1.12);
+                }
+                half3 rgb = saturate(half3(
+                    fma(half(1.4746), cBoost.y, yAnchored),
+                    fma(half(-0.57135), cBoost.y, fma(half(-0.16455), cBoost.x, yAnchored)),
+                    fma(half(1.8814), cBoost.x, yAnchored)));
+                return saturate(pow(rgb, half3(1.10)));
+            }
+            return saturate(half3(
+                fma(half(1.5748), cbcr.y, y),
+                fma(half(-0.468124), cbcr.y, fma(half(-0.187324), cbcr.x, y)),
+                fma(half(1.8556), cbcr.x, y)));
+        }
         // Low-frequency color over about three downscaled pixels; ignores moire that VT adds to fine detail.
-        inline half3 lowBlur(texture2d<half, access::sample> luma, texture2d<half, access::sample> chroma, float2 uv) {
+        inline half3 lowBlur(texture2d<half, access::sample> luma, texture2d<half, access::sample> chroma,
+                             float2 uv, bool bt2020 = false, bool softToe = false) {
             float2 step = 1.0f / float2(luma.get_width(), luma.get_height());
             half y = (luma.sample(linearSampler, uv + float2(-step.x, -step.y)).r
                     + luma.sample(linearSampler, uv + float2(step.x, -step.y)).r
                     + luma.sample(linearSampler, uv + float2(-step.x, step.y)).r
                     + luma.sample(linearSampler, uv + float2(step.x, step.y)).r) * half(0.25);
-            return nv12Color(y, chroma.sample(linearSampler, uv).rg);
+            if (!bt2020) return nv12Color(y, chroma.sample(linearSampler, uv).rg);
+            half2 cbcr = fma(chroma.sample(linearSampler, uv).rg, half(255.0 / 224.0), half(-128.0 / 224.0));
+            return decodeLowYCbCr(nv12Luma(y), cbcr, true, softToe);
         }
         // Four bilinear taps per output texel; covers both the 0.5 (4K) and 0.75 (1440p) scales.
         kernel void shrinkLuma(texture2d<half, access::sample> source [[texture(0)]],
@@ -1199,12 +1332,14 @@ final class HybridInterpolator {
             float2 lowStep = 1.0f / lowSize;
             float2 uv = (float2(gid) + 0.5f) / float2(w, h);
             uint motionFlags = uint(motionScale.w + 0.5f);
+            bool bt2020 = (motionFlags & 3u) >= 1u;
+            bool softToe = (motionFlags & 3u) >= 2u;
             bool hudDehalo = (motionFlags & 8u) != 0u;
             bool safeFinite = (motionFlags & 16u) != 0u;
             bool lowStatic = false;
             if (weights.y > 0.5f) {
-                half3 la = lowBlur(lowA, lowAChroma, uv);
-                half3 lb = lowBlur(lowB, lowBChroma, uv);
+                half3 la = lowBlur(lowA, lowAChroma, uv, bt2020, softToe);
+                half3 lb = lowBlur(lowB, lowBChroma, uv, bt2020, softToe);
                 lowStatic = length(la - lb) < half(0.012);
             }
             half2 centerRaw = motion.sample(nearestSampler, uv).rg;
