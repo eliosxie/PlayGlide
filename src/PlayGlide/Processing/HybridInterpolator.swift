@@ -76,6 +76,11 @@ final class HybridInterpolator {
     static var deferredFallbackMidpointEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_DEFERRED_FALLBACK_MIDPOINT"] != "0"
     }
+    /// Use IEEE-754 exponent bit-mask checks for motion vectors so Metal's default fast-math mode cannot
+    /// optimize `isfinite()` away (`PLAYGLIDE_SHADER_SAFE_FINITE=0` restores legacy `isfinite` for A/B).
+    static var shaderSafeFiniteEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_SHADER_SAFE_FINITE"] != "0"
+    }
     static let spatialMovingDetailEnabled =
         ProcessInfo.processInfo.environment["PLAYGLIDE_SPATIAL_MOVING_DETAIL"] == "1"
 
@@ -649,6 +654,7 @@ final class HybridInterpolator {
                     throw PipelineError(AppText("无法编码混合插帧", "Could not encode hybrid interpolation."))
                 }
                 let hudDehalo = Self.hudDehaloEnabled
+                let motionFlags = (hudDehalo ? 8 : 0) | (Self.shaderSafeFiniteEnabled ? 16 : 0)
                 var weights = SIMD4<Float>(
                     phase, restoresStaticPixels ? 1 : 0,
                     sharpenStrength ?? detailMode.sharpenStrength,
@@ -656,7 +662,7 @@ final class HybridInterpolator {
                 var motionParams = SIMD4<Float>(
                     1 / Float(motionSize.width), 1 / Float(motionSize.height),
                     Float(motionSize.width) / Float(forwardMotionSize.width),
-                    hudDehalo ? 8 : 0)
+                    Float(motionFlags))
                 let useMotion = motionTexture != nil && motionDetail != nil
                 if useMotion, let motionTexture, let motionDetail {
                     guard let select = command.makeComputeCommandEncoder() else {
@@ -1136,6 +1142,15 @@ final class HybridInterpolator {
             d += wg4 * abs(img.sample(linearSampler, uv - float2(0.0f, step.y)).r - m4);
             return d * invW;
         }
+        // Bit-level IEEE 754 exponent checks survive Metal's default fast-math optimization.
+        inline bool isFiniteHalf2(half2 value) {
+            return (as_type<ushort>(value.x) & 0x7C00u) != 0x7C00u
+                && (as_type<ushort>(value.y) & 0x7C00u) != 0x7C00u;
+        }
+        inline bool isFiniteMotion(half2 raw, float2 value, bool safeFinite) {
+            if (safeFinite) return isFiniteHalf2(raw);
+            return isfinite(value.x) && isfinite(value.y);
+        }
         // Evaluates bidirectional motion-vector candidates, edge-aware patch mismatch, forward-backward
         // occlusion consistency, and low-frequency static candidacy once per downscaled pixel (1/4 the
         // threads of 4K), packing (bestDUV.x, bestDUV.y, lowStatic ? wA + 2 : wA, wB) for full-res merge.
@@ -1157,22 +1172,25 @@ final class HybridInterpolator {
             float2 uv = (float2(gid) + 0.5f) / float2(w, h);
             uint motionFlags = uint(motionScale.w + 0.5f);
             bool hudDehalo = (motionFlags & 8u) != 0u;
+            bool safeFinite = (motionFlags & 16u) != 0u;
             bool lowStatic = false;
             if (weights.y > 0.5f) {
                 half3 la = lowBlur(lowA, lowAChroma, uv);
                 half3 lb = lowBlur(lowB, lowBChroma, uv);
                 lowStatic = length(la - lb) < half(0.012);
             }
-            float2 centerV = float2(motion.sample(nearestSampler, uv).rg);
-            bool centerSmall = !isfinite(centerV.x) || !isfinite(centerV.y)
-                || (abs(centerV.x) < 0.25f && abs(centerV.y) < 0.25f);
+            half2 centerRaw = motion.sample(nearestSampler, uv).rg;
+            float2 centerV = float2(centerRaw);
+            bool centerFinite = isFiniteMotion(centerRaw, centerV, safeFinite);
+            bool centerSmall = !centerFinite || (abs(centerV.x) < 0.25f && abs(centerV.y) < 0.25f);
             if (lowStatic && centerSmall) {
                 detailOut.write(half4(half(0.0), half(0.0), half(2.0), half(0.0)), gid);
                 return;
             }
             float fwdScale = motionScale.z;
-            float2 centerFwdV = hasForwardMotion
-                ? -float2(forwardMotion.sample(nearestSampler, uv).rg) * fwdScale : float2(0.0f);
+            half2 centerFwdRaw = hasForwardMotion
+                ? forwardMotion.sample(nearestSampler, uv).rg : half2(half(0.0));
+            float2 centerFwdV = hasForwardMotion ? -float2(centerFwdRaw) * fwdScale : float2(0.0f);
             float2 gridSize = float2(motion.get_width(), motion.get_height());
             float2 gridStep = 1.0f / gridSize;
             float2 gridFrac = fract(uv * gridSize);
@@ -1219,19 +1237,24 @@ final class HybridInterpolator {
             for (int i = 0; i < totalCandidates; ++i) {
                 if (i == 4 && bestScore < half(0.015)) break;
                 if (i == 5 && bestScore < half(0.022)) break;
+                half2 rawV;
                 float2 v;
                 if (i == 0) {
+                    rawV = centerRaw;
                     v = centerV;
                 } else if (i < 4) {
-                    v = float2(motion.sample(nearestSampler, uv + probeOffsets[i] * gridStep).rg);
+                    rawV = motion.sample(nearestSampler, uv + probeOffsets[i] * gridStep).rg;
+                    v = float2(rawV);
                 } else if (hasForwardMotion && i == 4) {
+                    rawV = centerFwdRaw;
                     v = centerFwdV;
                 } else {
                     int idx = hasForwardMotion ? (i - 1) : i;
-                    v = float2(motion.sample(nearestSampler, uv + probeOffsets[idx] * gridStep).rg);
+                    rawV = motion.sample(nearestSampler, uv + probeOffsets[idx] * gridStep).rg;
+                    v = float2(rawV);
                 }
-                if (!isfinite(v.x) || !isfinite(v.y) || (abs(v.x) < 0.25f && abs(v.y) < 0.25f)) continue;
-                if (i > 0 && ((abs(v.x - centerV.x) < 0.25f && abs(v.y - centerV.y) < 0.25f)
+                if (!isFiniteMotion(rawV, v, safeFinite) || (abs(v.x) < 0.25f && abs(v.y) < 0.25f)) continue;
+                if (i > 0 && ((centerFinite && abs(v.x - centerV.x) < 0.25f && abs(v.y - centerV.y) < 0.25f)
                            || (abs(v.x - lastV.x) < 0.25f && abs(v.y - lastV.y) < 0.25f)
                            || (abs(v.x - bestV.x) < 0.25f && abs(v.y - bestV.y) < 0.25f))) continue;
                 lastV = v;
@@ -1273,8 +1296,9 @@ final class HybridInterpolator {
                 };
                 float2 hudLastV = float2(1e6f);
                 for (int k = 0; k < 8; ++k) {
-                    float2 v = float2(motion.sample(nearestSampler, uv + hudOffsets[k] * gridStep).rg);
-                    if (!isfinite(v.x) || !isfinite(v.y) || (abs(v.x) < 0.25f && abs(v.y) < 0.25f)) continue;
+                    half2 rawV = motion.sample(nearestSampler, uv + hudOffsets[k] * gridStep).rg;
+                    float2 v = float2(rawV);
+                    if (!isFiniteMotion(rawV, v, safeFinite) || (abs(v.x) < 0.25f && abs(v.y) < 0.25f)) continue;
                     if ((abs(v.x - hudLastV.x) < 0.25f && abs(v.y - hudLastV.y) < 0.25f)
                         || (abs(v.x - bestV.x) < 0.25f && abs(v.y - bestV.y) < 0.25f)) continue;
                     hudLastV = v;
@@ -1308,16 +1332,18 @@ final class HybridInterpolator {
             if (hasForwardMotion && (wA + wB > half(0.02))) {
                 float2 uvA = uv + t * bestDUV;
                 float2 uvB = uv - (1.0f - t) * bestDUV;
-                float2 vABatA = float2(forwardMotion.sample(nearestSampler, uvA).rg) * fwdScale;
-                float2 vBAatB = float2(motion.sample(nearestSampler, uvB).rg);
+                half2 rawAB = forwardMotion.sample(nearestSampler, uvA).rg;
+                half2 rawBA = motion.sample(nearestSampler, uvB).rg;
+                float2 vABatA = float2(rawAB) * fwdScale;
+                float2 vBAatB = float2(rawBA);
                 float fbThresh = max(2.5f, 0.25f * length(bestV));
-                if (isfinite(vABatA.x) && isfinite(vABatA.y) && bestErrA > bestErrB + half(0.005)) {
+                if (isFiniteMotion(rawAB, vABatA, safeFinite) && bestErrA > bestErrB + half(0.005)) {
                     float fbA = length(vABatA + bestV);
                     if (fbA > fbThresh) {
                         wA *= smoothstep(half(fbThresh * 2.0f), half(fbThresh), half(fbA));
                     }
                 }
-                if (isfinite(vBAatB.x) && isfinite(vBAatB.y) && bestErrB > bestErrA + half(0.005)) {
+                if (isFiniteMotion(rawBA, vBAatB, safeFinite) && bestErrB > bestErrA + half(0.005)) {
                     float fbB = length(vBAatB - bestV);
                     if (fbB > fbThresh) {
                         wB *= smoothstep(half(fbThresh * 2.0f), half(fbThresh), half(fbB));

@@ -788,7 +788,9 @@ final class PreviewImageRenderer {
                 let select = command.makeComputeCommandEncoder()
             {
                 let hdrBits = recipe.isHDR10PQ ? (Self.hdr10SoftBlackToeEnabled ? 2 : 1) : 0
-                let motionFlags = hdrBits | (HybridInterpolator.hudDehaloEnabled ? 8 : 0)
+                let motionFlags =
+                    hdrBits | (HybridInterpolator.hudDehaloEnabled ? 8 : 0)
+                    | (HybridInterpolator.shaderSafeFiniteEnabled ? 16 : 0)
                 var weights = SIMD4<Float>(
                     recipe.phase, recipe.restoresStaticPixels ? 1 : 0, recipe.sharpenStrength,
                     Float(recipe.motionSize.width))
@@ -1192,6 +1194,15 @@ final class PreviewImageRenderer {
             }
             return half4(rgb, half(1.0));
         }
+        // Bit-level IEEE 754 exponent checks survive Metal's default fast-math optimization.
+        inline bool previewIsFiniteHalf2(half2 value) {
+            return (as_type<ushort>(value.x) & 0x7C00u) != 0x7C00u
+                && (as_type<ushort>(value.y) & 0x7C00u) != 0x7C00u;
+        }
+        inline bool previewIsFiniteMotion(half2 raw, float2 value, bool safeFinite) {
+            if (safeFinite) return previewIsFiniteHalf2(raw);
+            return isfinite(value.x) && isfinite(value.y);
+        }
         inline half previewNv12Luma(half luma) {
             return fma(luma, half(255.0 / 219.0), half(-16.0 / 219.0));
         }
@@ -1297,22 +1308,25 @@ final class PreviewImageRenderer {
             bool bt2020 = (motionFlags & 3u) >= 1u;
             bool softToe = (motionFlags & 3u) >= 2u;
             bool hudDehalo = (motionFlags & 8u) != 0u;
+            bool safeFinite = (motionFlags & 16u) != 0u;
             bool lowStatic = false;
             if (weights.y > 0.5f) {
                 half3 la = previewLowBlur(lowA, lowAChroma, uv, bt2020, softToe);
                 half3 lb = previewLowBlur(lowB, lowBChroma, uv, bt2020, softToe);
                 lowStatic = length(la - lb) < half(0.012);
             }
-            float2 centerV = float2(motion.sample(previewNearestSampler, uv).rg);
-            bool centerSmall = !isfinite(centerV.x) || !isfinite(centerV.y)
-                || (abs(centerV.x) < 0.25f && abs(centerV.y) < 0.25f);
+            half2 centerRaw = motion.sample(previewNearestSampler, uv).rg;
+            float2 centerV = float2(centerRaw);
+            bool centerFinite = previewIsFiniteMotion(centerRaw, centerV, safeFinite);
+            bool centerSmall = !centerFinite || (abs(centerV.x) < 0.25f && abs(centerV.y) < 0.25f);
             if (lowStatic && centerSmall) {
                 detailOut.write(half4(half(0.0), half(0.0), half(2.0), half(0.0)), gid);
                 return;
             }
             float fwdScale = motionScale.z;
-            float2 centerFwdV = previewHasForwardMotion
-                ? -float2(forwardMotion.sample(previewNearestSampler, uv).rg) * fwdScale : float2(0.0f);
+            half2 centerFwdRaw = previewHasForwardMotion
+                ? forwardMotion.sample(previewNearestSampler, uv).rg : half2(half(0.0));
+            float2 centerFwdV = previewHasForwardMotion ? -float2(centerFwdRaw) * fwdScale : float2(0.0f);
             float2 gridSize = float2(motion.get_width(), motion.get_height());
             float2 gridStep = 1.0f / gridSize;
             float2 gridFrac = fract(uv * gridSize);
@@ -1357,19 +1371,24 @@ final class PreviewImageRenderer {
             for (int i = 0; i < totalCandidates; ++i) {
                 if (i == 4 && bestScore < half(0.015)) break;
                 if (i == 5 && bestScore < half(0.022)) break;
+                half2 rawV;
                 float2 v;
                 if (i == 0) {
+                    rawV = centerRaw;
                     v = centerV;
                 } else if (i < 4) {
-                    v = float2(motion.sample(previewNearestSampler, uv + probeOffsets[i] * gridStep).rg);
+                    rawV = motion.sample(previewNearestSampler, uv + probeOffsets[i] * gridStep).rg;
+                    v = float2(rawV);
                 } else if (previewHasForwardMotion && i == 4) {
+                    rawV = centerFwdRaw;
                     v = centerFwdV;
                 } else {
                     int idx = previewHasForwardMotion ? (i - 1) : i;
-                    v = float2(motion.sample(previewNearestSampler, uv + probeOffsets[idx] * gridStep).rg);
+                    rawV = motion.sample(previewNearestSampler, uv + probeOffsets[idx] * gridStep).rg;
+                    v = float2(rawV);
                 }
-                if (!isfinite(v.x) || !isfinite(v.y) || (abs(v.x) < 0.25f && abs(v.y) < 0.25f)) continue;
-                if (i > 0 && ((abs(v.x - centerV.x) < 0.25f && abs(v.y - centerV.y) < 0.25f)
+                if (!previewIsFiniteMotion(rawV, v, safeFinite) || (abs(v.x) < 0.25f && abs(v.y) < 0.25f)) continue;
+                if (i > 0 && ((centerFinite && abs(v.x - centerV.x) < 0.25f && abs(v.y - centerV.y) < 0.25f)
                            || (abs(v.x - lastV.x) < 0.25f && abs(v.y - lastV.y) < 0.25f)
                            || (abs(v.x - bestV.x) < 0.25f && abs(v.y - bestV.y) < 0.25f))) continue;
                 lastV = v;
@@ -1411,8 +1430,9 @@ final class PreviewImageRenderer {
                 };
                 float2 hudLastV = float2(1e6f);
                 for (int k = 0; k < 8; ++k) {
-                    float2 v = float2(motion.sample(previewNearestSampler, uv + hudOffsets[k] * gridStep).rg);
-                    if (!isfinite(v.x) || !isfinite(v.y) || (abs(v.x) < 0.25f && abs(v.y) < 0.25f)) continue;
+                    half2 rawV = motion.sample(previewNearestSampler, uv + hudOffsets[k] * gridStep).rg;
+                    float2 v = float2(rawV);
+                    if (!previewIsFiniteMotion(rawV, v, safeFinite) || (abs(v.x) < 0.25f && abs(v.y) < 0.25f)) continue;
                     if ((abs(v.x - hudLastV.x) < 0.25f && abs(v.y - hudLastV.y) < 0.25f)
                         || (abs(v.x - bestV.x) < 0.25f && abs(v.y - bestV.y) < 0.25f)) continue;
                     hudLastV = v;
@@ -1446,16 +1466,18 @@ final class PreviewImageRenderer {
             if (previewHasForwardMotion && (wA + wB > half(0.02))) {
                 float2 uvA = uv + t * bestDUV;
                 float2 uvB = uv - (1.0f - t) * bestDUV;
-                float2 vABatA = float2(forwardMotion.sample(previewNearestSampler, uvA).rg) * fwdScale;
-                float2 vBAatB = float2(motion.sample(previewNearestSampler, uvB).rg);
+                half2 rawAB = forwardMotion.sample(previewNearestSampler, uvA).rg;
+                half2 rawBA = motion.sample(previewNearestSampler, uvB).rg;
+                float2 vABatA = float2(rawAB) * fwdScale;
+                float2 vBAatB = float2(rawBA);
                 float fbThresh = max(2.5f, 0.25f * length(bestV));
-                if (isfinite(vABatA.x) && isfinite(vABatA.y) && bestErrA > bestErrB + half(0.005)) {
+                if (previewIsFiniteMotion(rawAB, vABatA, safeFinite) && bestErrA > bestErrB + half(0.005)) {
                     float fbA = length(vABatA + bestV);
                     if (fbA > fbThresh) {
                         wA *= smoothstep(half(fbThresh * 2.0f), half(fbThresh), half(fbA));
                     }
                 }
-                if (isfinite(vBAatB.x) && isfinite(vBAatB.y) && bestErrB > bestErrA + half(0.005)) {
+                if (previewIsFiniteMotion(rawBA, vBAatB, safeFinite) && bestErrB > bestErrA + half(0.005)) {
                     float fbB = length(vBAatB - bestV);
                     if (fbB > fbThresh) {
                         wB *= smoothstep(half(fbThresh * 2.0f), half(fbThresh), half(fbB));
