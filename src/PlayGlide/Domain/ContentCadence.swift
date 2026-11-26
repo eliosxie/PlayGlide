@@ -93,6 +93,11 @@ struct ContentCadence: Sendable {
     static var interactiveSixtyGuardEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_INTERACTIVE_SIXTY_GUARD"] != "0"
     }
+    /// Allow symmetric UVC 3+1 / 1+3 burst slips while confirming return from 60 fps passthrough to 30 fps
+    /// (`PLAYGLIDE_SLIP_AWARE_THIRTY_RETURN=0` restores strict consecutive-2-tick confirmation for A/B).
+    static var slipAwareThirtyReturnEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_SLIP_AWARE_THIRTY_RETURN"] != "0"
+    }
 
     private static let maximumInterpolatableGapTicks = 2.6
     private static let sixtyToThirtyConfirmationThreshold = 8
@@ -106,6 +111,11 @@ struct ContentCadence: Sendable {
         guard isSixtyHzTransport(tick) else { return false }
         let ticks = (gap / tick).rounded()
         return (ticks == 1 || ticks == 2) && abs(gap - ticks * tick) <= max(0.002, tick * 0.15)
+    }
+
+    private static func isWholeTransportTicks(_ gap: Double, tick: Double, count: Double) -> Bool {
+        guard isSixtyHzTransport(tick) else { return false }
+        return abs(gap - count * tick) <= max(0.002, tick * 0.15)
     }
 
     /// Generated images between two endpoints: normally equal fractions of the pair. After a held picture,
@@ -162,10 +172,12 @@ struct ContentCadence: Sendable {
     private let toleratingContentHitches: Bool
     private let adaptiveHarmonicRate: Bool
     private let interactiveSixtyGuard: Bool
+    private let slipAwareThirtyReturn: Bool
     private var nominalPeriod: CMTime?
     private var pendingHitchGap: Double?
     private var pendingHitchRemaining = 0
     private var pendingThirtyConfirmation = 0
+    private var pendingThirtySlipTicks = 0
     private var harmonicSixtyOffset: CMTime = .zero
     private var slipOffset: CMTime = .zero
     private var slipFramesRemaining = 0
@@ -192,13 +204,15 @@ struct ContentCadence: Sendable {
     init(
         toleratingWindowJitter: Bool = false, preservingRepeatedTransport: Bool = false,
         toleratingContentHitches: Bool = false, adaptiveHarmonicRate: Bool = false,
-        interactiveSixtyGuard: Bool = ContentCadence.interactiveSixtyGuardEnabled
+        interactiveSixtyGuard: Bool = ContentCadence.interactiveSixtyGuardEnabled,
+        slipAwareThirtyReturn: Bool = ContentCadence.slipAwareThirtyReturnEnabled
     ) {
         windowCadence = toleratingWindowJitter ? WindowCadence() : nil
         self.preservingRepeatedTransport = preservingRepeatedTransport
         self.toleratingContentHitches = toleratingContentHitches
         self.adaptiveHarmonicRate = adaptiveHarmonicRate
         self.interactiveSixtyGuard = interactiveSixtyGuard
+        self.slipAwareThirtyReturn = slipAwareThirtyReturn
     }
 
     mutating func accept(
@@ -232,6 +246,7 @@ struct ContentCadence: Sendable {
             pendingHitchGap = nil
             pendingHitchRemaining = 0
             pendingThirtyConfirmation = 0
+            pendingThirtySlipTicks = 0
             harmonicSixtyOffset = .zero
             slipOffset = .zero
             slipFramesRemaining = 0
@@ -284,6 +299,7 @@ struct ContentCadence: Sendable {
             pendingHitchGap = nil
             pendingHitchRemaining = 0
             pendingThirtyConfirmation = 0
+            pendingThirtySlipTicks = 0
             harmonicSixtyOffset = .zero
             slipOffset = .zero
             slipFramesRemaining = 0
@@ -299,6 +315,7 @@ struct ContentCadence: Sendable {
             pendingHitchGap = nil
             pendingHitchRemaining = 0
             pendingThirtyConfirmation = 0
+            pendingThirtySlipTicks = 0
         }
         let tick = duration.seconds
         if toleratingContentHitches, windowCadence == nil, !inputSkipped, !sceneCut,
@@ -369,6 +386,9 @@ struct ContentCadence: Sendable {
                 // duplicates, UI ease-out tails, and short pauses produce isolated or brief 2-tick/multi-tick
                 // gaps. Keep 1x passthrough until sustained 2-tick frames confirm genuine 30 fps.
                 let isTwoTick = Self.isHarmonicThirtyOrSixty(gapSeconds, tick: tick)
+                let isThreeTick =
+                    slipAwareThirtyReturn && interactiveSixtyGuard
+                    && Self.isWholeTransportTicks(gapSeconds, tick: tick, count: 3)
                 let carriedOffset = harmonicSixtyOffset
                 harmonicSixtyOffset = .zero
                 phaseSlipOffset = .zero
@@ -379,14 +399,27 @@ struct ContentCadence: Sendable {
                 let effectiveInterval =
                     isTwoTick && CMTimeCompare(carriedOffset, .zero) < 0 ? CMTimeAdd(gap, carriedOffset) : gap
                 let requiredConfirmations = interactiveSixtyGuard ? Self.sixtyToThirtyConfirmationThreshold : 2
-                if isTwoTick && pendingThirtyConfirmation + 1 >= requiredConfirmations {
+                if isTwoTick && pendingThirtySlipTicks == 0
+                    && pendingThirtyConfirmation + 1 >= requiredConfirmations
+                {
                     pendingThirtyConfirmation = 0
+                    pendingThirtySlipTicks = 0
                     lastAcceptedGap = gapSeconds
                     self.nominalPeriod = gap
                     interval = effectiveInterval
                     return .keep(reset: false, interval: effectiveInterval)
                 }
-                pendingThirtyConfirmation = isTwoTick ? (pendingThirtyConfirmation + 1) : 0
+                if isTwoTick {
+                    pendingThirtyConfirmation = min(requiredConfirmations - 1, pendingThirtyConfirmation + 1)
+                } else if isThreeTick && pendingThirtySlipTicks <= 0 {
+                    // A +1 tick UVC burst slip (3...1 or closing 1...3) preserves the 2-tick 30 fps mean;
+                    // require the slip to balance back to zero and exit on a clean 2-tick frame.
+                    pendingThirtySlipTicks += 1
+                    pendingThirtyConfirmation = min(requiredConfirmations - 1, pendingThirtyConfirmation + 1)
+                } else {
+                    pendingThirtyConfirmation = 0
+                    pendingThirtySlipTicks = 0
+                }
                 hitchPeriod = nominalPeriod
                 interval = effectiveInterval
                 return .keep(reset: false, interval: effectiveInterval)
@@ -417,7 +450,10 @@ struct ContentCadence: Sendable {
                     interval = nominalPeriod
                     return .keep(reset: false, interval: nominalPeriod)
                 }
-                if adaptiveHarmonicRate, Self.isHarmonicThirtyOrSixty(nominal, tick: tick),
+                let completesPendingHitch =
+                    slipAwareThirtyReturn
+                    && (pendingHitchGap.map { abs($0 + gapSeconds - 2 * nominal) <= tolerance } ?? false)
+                if adaptiveHarmonicRate, !completesPendingHitch, Self.isHarmonicThirtyOrSixty(nominal, tick: tick),
                     Self.isHarmonicThirtyOrSixty(gapSeconds, tick: tick)
                 {
                     // Switching from 30 fps (2 ticks) to 60 fps (1 tick) inside a 60 Hz container
@@ -427,6 +463,7 @@ struct ContentCadence: Sendable {
                     pendingHitchGap = nil
                     pendingHitchRemaining = 0
                     pendingThirtyConfirmation = 0
+                    pendingThirtySlipTicks = 0
                     previousTime = time
                     previousContentArrival = arrival
                     lastAcceptedGap = gapSeconds
@@ -436,6 +473,7 @@ struct ContentCadence: Sendable {
                 }
                 harmonicSixtyOffset = .zero
                 pendingThirtyConfirmation = 0
+                pendingThirtySlipTicks = 0
                 let pendingHitch = pendingHitchGap
                 let sustained = pendingHitch.map { abs(gapSeconds - $0) <= tolerance } ?? false
                 let completesPair = pendingHitch.map { abs($0 + gapSeconds - 2 * nominal) <= tolerance } ?? false
@@ -459,7 +497,20 @@ struct ContentCadence: Sendable {
                 pendingHitchGap = nil
                 pendingHitchRemaining = 0
             } else {
-                pendingThirtyConfirmation = 0
+                if slipAwareThirtyReturn && interactiveSixtyGuard && adaptiveHarmonicRate
+                    && (nominalGap.map { $0 < tick * 1.5 } ?? false)
+                    && Self.isWholeTransportTicks(gapSeconds, tick: tick, count: 1)
+                    && (pendingThirtySlipTicks > 0 || (pendingThirtyConfirmation >= 2 && pendingThirtySlipTicks == 0))
+                {
+                    // A single 1-tick frame either closes an open 3+1 UVC slip or opens a tentative 1+3 slip;
+                    // a second consecutive 1-tick (genuine 60 fps) sees pendingThirtySlipTicks == -1 and resets.
+                    pendingThirtySlipTicks -= 1
+                    let cap = Self.sixtyToThirtyConfirmationThreshold - 1
+                    pendingThirtyConfirmation = min(cap, pendingThirtyConfirmation + 1)
+                } else {
+                    pendingThirtyConfirmation = 0
+                    pendingThirtySlipTicks = 0
+                }
                 if pendingHitchRemaining > 0 {
                     pendingHitchRemaining -= 1
                     if pendingHitchRemaining == 0 { pendingHitchGap = nil }
@@ -469,6 +520,7 @@ struct ContentCadence: Sendable {
             pendingHitchGap = nil
             pendingHitchRemaining = 0
             pendingThirtyConfirmation = 0
+            pendingThirtySlipTicks = 0
             harmonicSixtyOffset = .zero
             slipOffset = .zero
             slipFramesRemaining = 0
@@ -484,6 +536,7 @@ struct ContentCadence: Sendable {
             pendingHitchGap = nil
             pendingHitchRemaining = 0
             pendingThirtyConfirmation = 0
+            pendingThirtySlipTicks = 0
             previousTime = time
             previousContentArrival = arrival
             lastAcceptedGap = tick
