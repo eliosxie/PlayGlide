@@ -47,6 +47,16 @@ jobs:
           app="$RUNNER_TEMP/PlayGlide/Build/Products/Release/PlayGlide.app"
           xcrun lipo -verify_arch arm64 "$app/Contents/MacOS/PlayGlide"
           test -f "$app/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"
+          if xcrun --sdk macosx metal --version >/dev/null 2>&1; then
+            metal_sources=()
+            while IFS= read -r -d '' shader_path; do
+              metal_sources+=("$shader_path")
+            done < <(find src/PlayGlide/Shaders -type f -name '*.metal' -print0)
+            if [[ ${#metal_sources[@]} -gt 0 ]]; then
+              xcrun --sdk macosx metal -std=metal3.1 -mmacosx-version-min=15.0 -O2 \
+                -o "$app/Contents/Resources/default.metallib" "${metal_sources[@]}"
+            fi
+          fi
           codesign --force --sign - --options runtime --entitlements config/PlayGlide.entitlements "$app"
           codesign --verify --strict "$app"
 
