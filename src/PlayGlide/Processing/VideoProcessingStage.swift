@@ -116,6 +116,7 @@ actor FrameProcessor: VideoProcessingStage {
     nonisolated let usesUserInteractiveQueue: Bool
     private let executorQueue: DispatchSerialQueue
     private let preferFlowTextureViews: Bool
+    private let preservesFlowHDR10: Bool
     private var usesStableWindowCadence: Bool
     private var plan: ProcessingPlan?
     private var processor: VTFrameProcessor?
@@ -146,7 +147,8 @@ actor FrameProcessor: VideoProcessingStage {
 
     init(
         settings: SessionDraft, generation: UUID, mailbox: FrameMailbox, preferFlowTextureViews: Bool = true,
-        useUserInteractiveQueue: Bool = PipelineSession.userInteractiveQoSEnabled
+        useUserInteractiveQueue: Bool = PipelineSession.userInteractiveQoSEnabled,
+        preservesFlowHDR10: Bool = FlowInterpolator.hdrPassthroughEnabled
     ) {
         self.settings = settings
         self.generation = generation
@@ -156,6 +158,7 @@ actor FrameProcessor: VideoProcessingStage {
             label: "PlayGlide.frame.processor",
             qos: useUserInteractiveQueue ? .userInteractive : .unspecified)
         self.preferFlowTextureViews = preferFlowTextureViews
+        self.preservesFlowHDR10 = preservesFlowHDR10
         usesStableWindowCadence = settings.usesStableWindowCadence
     }
 
@@ -195,7 +198,8 @@ actor FrameProcessor: VideoProcessingStage {
             return
         }
         if plan.backend == .opticalFlow && plan.multiplier == 2 {
-            let flow = try FlowInterpolator(size: size, preferFlowTextureViews: preferFlowTextureViews)
+            let flow = try FlowInterpolator(
+                size: size, preferFlowTextureViews: preferFlowTextureViews, preservesHDR10: preservesFlowHDR10)
             flowInterpolator = flow
             mailbox.mutate(generation) {
                 $0.backend = AppText(
@@ -448,10 +452,12 @@ actor FrameProcessor: VideoProcessingStage {
                 return
             }
         }
-        let converted = try converter.convert(frame, pool: sourcePool)
+        let converted = try converter.convert(frame, pool: sourcePool, preserveHDR10: preservesFlowHDR10)
         defer { previous = (converted, frame) }
         guard let previous else { return }  // Warm up: start pacing with the first genuine generated frame.
-        let previousConverted = try previous.converted ?? converter.convert(previous.original, pool: sourcePool)
+        let previousConverted =
+            try previous.converted
+            ?? converter.convert(previous.original, pool: sourcePool, preserveHDR10: preservesFlowHDR10)
         let delta = CMTimeSubtract(frame.presentationTime, previousConverted.presentationTime)
         guard delta.isNumeric, delta.seconds > 0, delta.seconds <= ContentCadence.maximumInterpolationGap else {
             return
@@ -486,7 +492,11 @@ actor FrameProcessor: VideoProcessingStage {
             plan.backend == .lowLatency
             ? ContentCadence.lowLatencyPhases(count: placements.count, multiplier: plan.multiplier)
             : placements.map(\.phase)
-        let destinations = try placements.map { try destinationPool.makeVTFrame(at: $0.time) }
+        let pairIsHDR10 =
+            preservesFlowHDR10
+            && previous.original.pixelBuffer.withUnsafeBuffer { PixelConverter.isHDR10PQ($0) }
+            && frame.pixelBuffer.withUnsafeBuffer { PixelConverter.isHDR10PQ($0) }
+        let destinations = try placements.map { try destinationPool.makeVTFrame(at: $0.time, hdr10PQ: pairIsHDR10) }
         let currentVT = try vtFrame(converted)
         let previousVT = try vtFrame(previousConverted)
         if plan.backend == .frameRateConversion {
@@ -515,7 +525,13 @@ actor FrameProcessor: VideoProcessingStage {
                 }
                 // Consume into a separately owned read-only buffer after native completion;
                 // caller-owned FRC destination buffers must never be published while writable.
-                let pixel = try converter.render(CIImage(cvPixelBuffer: destination.buffer), pool: readOnlyOutputPool)
+                let pixel: CVReadOnlyPixelBuffer
+                if pairIsHDR10 {
+                    pixel = try converter.copyReadOnly(
+                        from: destination.buffer, pool: readOnlyOutputPool, hdr10PQ: true)
+                } else {
+                    pixel = try converter.render(CIImage(cvPixelBuffer: destination.buffer), pool: readOnlyOutputPool)
+                }
                 let video = VideoFrame(
                     pixelBuffer: pixel, presentationTime: destination.presentationTimeStamp,
                     duration: outputDuration, sequence: frame.sequence, arrivalTime: frame.arrivalTime,

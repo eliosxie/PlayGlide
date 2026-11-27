@@ -7,9 +7,34 @@ constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filte
 inline bool isFiniteHalf(half value) {
     return (as_type<ushort>(value) & 0x7C00u) != 0x7C00u;
 }
-inline half3 nv12Color(half luma, half2 chroma) {
+inline half3 nv12Color(half luma, half2 chroma, uint hdrMode) {
     half y = fma(luma, half(255.0 / 219.0), half(-16.0 / 219.0));
     half2 cbcr = fma(chroma, half(255.0 / 224.0), half(-128.0 / 224.0));
+    if (hdrMode == 3u) {
+        half yClamped = saturate(y);
+        return saturate(half3(
+            fma(half(1.4746), cbcr.y, yClamped),
+            fma(half(-0.5713531), cbcr.y, fma(half(-0.1645531), cbcr.x, yClamped)),
+            fma(half(1.8814), cbcr.x, yClamped)));
+    }
+    if (hdrMode >= 1u) {
+        half yPos = max(half(0.0), y);
+        half yAnchored;
+        half2 cBoost;
+        if (hdrMode == 2u) {
+            half t = saturate(yPos * half(1.0 / 0.08));
+            yAnchored = yPos * mix(half(0.25), half(1.0), t);
+            cBoost = cbcr * mix(half(0.75), half(1.12), t);
+        } else {
+            yAnchored = max(half(0.0), (yPos - half(0.042)) * half(1.0 / 0.958));
+            cBoost = cbcr * half(1.12);
+        }
+        half3 rgb = saturate(half3(
+            fma(half(1.4746), cBoost.y, yAnchored),
+            fma(half(-0.57135), cBoost.y, fma(half(-0.16455), cBoost.x, yAnchored)),
+            fma(half(1.8814), cBoost.x, yAnchored)));
+        return saturate(pow(rgb, half3(1.10)));
+    }
     return saturate(half3(
         fma(half(1.5748), cbcr.y, y),
         fma(half(-0.468124), cbcr.y, fma(half(-0.187324), cbcr.x, y)),
@@ -17,10 +42,10 @@ inline half3 nv12Color(half luma, half2 chroma) {
 }
 // chromaOffset moves from chroma texel centers to the sample positions of the surface's 4:2:0 siting.
 inline half3 colorAt(texture2d<half, access::sample> image, texture2d<half, access::sample> chroma, float2 uv,
-                     float2 chromaOffset) {
+                     float2 chromaOffset, uint hdrMode) {
     half3 value = image.sample(linearSampler, uv).rgb;
     if (!nv12) return value;
-    return nv12Color(value.r, chroma.sample(linearSampler, uv + chromaOffset).rg);
+    return nv12Color(value.r, chroma.sample(linearSampler, uv + chromaOffset).rg, hdrMode);
 }
 inline half valid(float2 p) { return all(p >= 0.0f) && all(p <= 1.0f) ? half(1.0) : half(0.0); }
 inline float2 flowAt(texture2d<half, access::sample> field, float2 uv) {
@@ -31,19 +56,20 @@ kernel void downscale(texture2d<half, access::sample> image [[texture(0)]],
                       texture2d<half, access::write> output [[texture(1)]],
                       texture2d<half, access::sample> chroma [[texture(2), function_constant(nv12)]],
                       constant float2 &chromaOffset [[buffer(0)]],
+                      constant uint &hdrMode [[buffer(1)]],
                       uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
     float2 outSize = float2(output.get_width(), output.get_height());
     float2 base = (float2(gid) + 0.5f) / outSize;
     half3 color;
     if (image.get_width() == output.get_width() && image.get_height() == output.get_height()) {
-        color = colorAt(image, chroma, base, chromaOffset);
+        color = colorAt(image, chroma, base, chromaOffset, hdrMode);
     } else {
         float2 offset = 0.25f / outSize;
-        color = (colorAt(image, chroma, base + float2(-offset.x, -offset.y), chromaOffset)
-               + colorAt(image, chroma, base + float2( offset.x, -offset.y), chromaOffset)
-               + colorAt(image, chroma, base + float2(-offset.x,  offset.y), chromaOffset)
-               + colorAt(image, chroma, base + float2( offset.x,  offset.y), chromaOffset)) * half(0.25);
+        color = (colorAt(image, chroma, base + float2(-offset.x, -offset.y), chromaOffset, hdrMode)
+               + colorAt(image, chroma, base + float2( offset.x, -offset.y), chromaOffset, hdrMode)
+               + colorAt(image, chroma, base + float2(-offset.x,  offset.y), chromaOffset, hdrMode)
+               + colorAt(image, chroma, base + float2( offset.x,  offset.y), chromaOffset, hdrMode)) * half(0.25);
     }
     output.write(half4(saturate(color), half(1.0)), gid);
 }
@@ -56,6 +82,7 @@ kernel void interpolate(texture2d<half, access::sample> a [[texture(0)]],
                         texture2d<half, access::sample> bChroma [[texture(6), function_constant(nv12)]],
                         constant float4 &parameters [[buffer(0)]],
                         constant float4 &chromaOffsets [[buffer(1)]],
+                        constant uint &hdrMode [[buffer(2)]],
                         uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
     float2 uv = (float2(gid) + 0.5f) / float2(output.get_width(), output.get_height());
@@ -68,7 +95,8 @@ kernel void interpolate(texture2d<half, access::sample> a [[texture(0)]],
     if (!lowMotion && motionSum < parameters.w) {
         // An unchanged pixel under small estimated motion keeps its exact source value, so static
         // fine detail does not alternate between source and resampled images.
-        half3 originalA = colorAt(a, aChroma, uv, aOffset), originalB = colorAt(b, bChroma, uv, bOffset);
+        half3 originalA = colorAt(a, aChroma, uv, aOffset, hdrMode);
+        half3 originalB = colorAt(b, bChroma, uv, bOffset, hdrMode);
         if (length(originalA - originalB) < half(0.006)) {
             output.write(half4(originalA, half(1.0)), gid);
             return;
@@ -76,7 +104,8 @@ kernel void interpolate(texture2d<half, access::sample> a [[texture(0)]],
     }
     half3 fallbackColor = half3(0.0);
     if (lowMotion) {
-        half3 originalA = colorAt(a, aChroma, uv, aOffset), originalB = colorAt(b, bChroma, uv, bOffset);
+        half3 originalA = colorAt(a, aChroma, uv, aOffset, hdrMode);
+        half3 originalB = colorAt(b, bChroma, uv, bOffset, hdrMode);
         if (length(originalA - originalB) < half(0.006)) {
             output.write(half4(originalA, half(1.0)), gid);
             return;
@@ -92,11 +121,11 @@ kernel void interpolate(texture2d<half, access::sample> a [[texture(0)]],
     float2 f = flowAt(forward, p);
     float2 r = flowAt(backward, q);
     float2 nextP = p + f * invFlowSize, previousQ = q + r * invFlowSize;
-    half3 ca = colorAt(a, aChroma, p, aOffset), cb = colorAt(b, bChroma, q, bOffset);
+    half3 ca = colorAt(a, aChroma, p, aOffset, hdrMode), cb = colorAt(b, bChroma, q, bOffset, hdrMode);
     half errorA = half(min(length(f + flowAt(backward, nextP)), 100.0f));
     half errorB = half(min(length(r + flowAt(forward, previousQ)), 100.0f));
-    half photoA = length(ca - colorAt(b, bChroma, nextP, bOffset));
-    half photoB = length(cb - colorAt(a, aChroma, previousQ, aOffset));
+    half photoA = length(ca - colorAt(b, bChroma, nextP, bOffset, hdrMode));
+    half photoB = length(cb - colorAt(a, aChroma, previousQ, aOffset, hdrMode));
     half hPhase = half(phase);
     half wa = valid(p) * valid(nextP) * exp(fma(half(-8.0), photoA, half(-0.7) * errorA)) * (half(1.0) - hPhase);
     half wb = valid(q) * valid(previousQ) * exp(fma(half(-8.0), photoB, half(-0.7) * errorB)) * hPhase;
@@ -106,7 +135,7 @@ kernel void interpolate(texture2d<half, access::sample> a [[texture(0)]],
     half3 color;
     if (weightSum < half(0.05)) {
         if (lowMotion) color = fallbackColor;
-        else color = phase < 0.5f ? colorAt(a, aChroma, uv, aOffset) : colorAt(b, bChroma, uv, bOffset);
+        else color = phase < 0.5f ? colorAt(a, aChroma, uv, aOffset, hdrMode) : colorAt(b, bChroma, uv, bOffset, hdrMode);
     } else {
         color = (wa * ca + wb * cb) / weightSum;
         if (selectOcclusion && !lowMotion && length(ca - cb) > half(0.08)) {

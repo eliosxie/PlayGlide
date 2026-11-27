@@ -96,7 +96,15 @@ final class FlowInterpolator {
     /// both sources keeps its source value instead of a resampled one, so static fine detail does not
     /// alternate between sharp sources and softer midpoints. A higher limit can erase thin moving details.
     static let defaultStaticFlowLimit: Float = 4
+    /// Preserve HDR10 PQ pixel encoding and BT.2020/ST.2084 attachments across explicit optical-flow and
+    /// VideoToolbox FRC backends so generated frames match original frame luminance and color
+    /// (`PLAYGLIDE_FLOW_HDR_PASSTHROUGH=1`).
+    static var hdrPassthroughEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_FLOW_HDR_PASSTHROUGH"] == "1"
+    }
     private let staticFlowLimit: Float
+    private let preservesHDR10: Bool
+    var hdr10ReferencePQOverride: Bool?
     private let cache: CVMetalTextureCache
     private let forwardTexture: any MTLTexture
     private let backwardTexture: any MTLTexture
@@ -116,6 +124,7 @@ final class FlowInterpolator {
         let chroma: CVMetalTexture?
         /// Normalized offset from chroma texel centers to the sample positions of this surface's siting.
         var chromaOffset = SIMD2<Float>(0, 0)
+        var isHDR10PQ = false
     }
 
     private struct FlowField {
@@ -128,11 +137,13 @@ final class FlowInterpolator {
         size: VideoSize, preferFlowTextureViews: Bool = true, preferNV12: Bool = true,
         prefersOcclusionSelection: Bool = ProcessInfo.processInfo.environment["PLAYGLIDE_FLOW_OCCLUSION_SELECT"] == "1",
         staticFlowLimit: Float = Float(ProcessInfo.processInfo.environment["PLAYGLIDE_FLOW_STATIC_LIMIT"] ?? "")
-            ?? FlowInterpolator.defaultStaticFlowLimit
+            ?? FlowInterpolator.defaultStaticFlowLimit,
+        preservesHDR10: Bool = FlowInterpolator.hdrPassthroughEnabled
     ) throws {
         input = size
         self.preferFlowTextureViews = preferFlowTextureViews
         self.staticFlowLimit = max(0, staticFlowLimit)
+        self.preservesHDR10 = preservesHDR10
         let scale = min(1, 480.0 / Double(max(size.width, size.height)))
         let work = VideoSize(
             width: max(32, Int((Double(size.width) * scale / 2).rounded()) * 2),
@@ -239,9 +250,20 @@ final class FlowInterpolator {
         let forwardSeconds = forwardEstimated - downscaled
         let backwardSeconds = mediaHostTime() - forwardEstimated
         let estimated = mediaHostTime()
+        let isHDR10Output = preservesHDR10 && first.isHDR10PQ && second.isHDR10PQ
+        var hdrMode: UInt32 =
+            isHDR10Output
+            ? UInt32(
+                PreviewImageRenderer.hdr10ShaderModeBits(
+                    referencePQ: hdr10ReferencePQOverride ?? PreviewImageRenderer.hdr10ReferencePQEnabled))
+            : 0
         let output = try outputPool.makeMutable()
         try output.withUnsafeBuffer { outputRaw in
-            PixelConverter.attach709(to: outputRaw)
+            if isHDR10Output {
+                PixelConverter.attachHDR10PQ(to: outputRaw)
+            } else {
+                PixelConverter.attach709(to: outputRaw)
+            }
             let resultTexture = try texture(outputRaw, format: .bgra8Unorm, size: input, usage: .shaderWrite)
             guard let a = CVMetalTextureGetTexture(first.image),
                 let b = CVMetalTextureGetTexture(second.image),
@@ -266,6 +288,7 @@ final class FlowInterpolator {
             var chromaOffsets = SIMD4<Float>(
                 first.chromaOffset.x, first.chromaOffset.y, second.chromaOffset.x, second.chromaOffset.y)
             encoder.setBytes(&chromaOffsets, length: MemoryLayout<SIMD4<Float>>.stride, index: 1)
+            encoder.setBytes(&hdrMode, length: MemoryLayout<UInt32>.stride, index: 2)
             encoder.dispatchThreads(
                 MTLSize(width: input.width, height: input.height, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
@@ -372,6 +395,13 @@ final class FlowInterpolator {
         }
         var chromaOffset = reference.chromaOffset
         encoder.setBytes(&chromaOffset, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+        var hdrMode: UInt32 =
+            preservesHDR10 && reference.isHDR10PQ
+            ? UInt32(
+                PreviewImageRenderer.hdr10ShaderModeBits(
+                    referencePQ: hdr10ReferencePQOverride ?? PreviewImageRenderer.hdr10ReferencePQEnabled))
+            : 0
+        encoder.setBytes(&hdrMode, length: MemoryLayout<UInt32>.stride, index: 1)
         encoder.dispatchThreads(
             MTLSize(width: work.width, height: work.height, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
@@ -420,31 +450,49 @@ final class FlowInterpolator {
         let started = mediaHostTime()
         let pool = try conversionPool ?? PixelBufferPool(size: input, format: kCVPixelFormatType_32BGRA)
         conversionPool = pool
-        let converted = try converter.convert(frame, pool: pool)
+        let converted = try converter.convert(frame, pool: pool, preserveHDR10: preservesHDR10)
         conversion = (conversion ?? 0) + (mediaHostTime() - started)
         return converted
     }
 
     private func bgraReference(_ frame: VideoFrame) throws -> Reference {
         var view: CVMetalTexture?
-        try frame.pixelBuffer.withUnsafeBuffer { view = try texture($0, format: .bgra8Unorm, size: input) }
+        var isHDR10 = false
+        try frame.pixelBuffer.withUnsafeBuffer { pixel in
+            isHDR10 = preservesHDR10 && PixelConverter.isHDR10PQ(pixel)
+            view = try texture(pixel, format: .bgra8Unorm, size: input)
+        }
         guard let view else {
             throw PipelineError(AppText("无法映射 BGRA 参考图像", "Could not map the BGRA reference image."))
         }
-        return Reference(frame: frame, image: view, chroma: nil)
+        return Reference(frame: frame, image: view, chroma: nil, isHDR10PQ: isHDR10)
     }
 
     private func nv12Reference(_ frame: VideoFrame) -> Reference? {
         var reference: Reference?
         frame.pixelBuffer.withUnsafeBuffer { pixel in
-            // The shader decodes progressive video-range Rec.709 at center, left, top or bottom 4:2:0 siting.
-            // Delegate any other color profile or plane layout to Core Image.
+            // The shader decodes progressive video-range Rec.709 (or HDR10 PQ BT.2020 when preservesHDR10 is enabled)
+            // at center, left, top or bottom 4:2:0 siting. Delegate any other color profile or plane layout to Core Image.
             guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-                CVPixelBufferGetPlaneCount(pixel) == 2, CVPixelBufferGetIOSurface(pixel) != nil,
-                let colorSpace = CVBufferCopyAttachment(pixel, kCVImageBufferCGColorSpaceKey, nil),
+                CVPixelBufferGetPlaneCount(pixel) == 2, CVPixelBufferGetIOSurface(pixel) != nil
+            else { return }
+            let isHDR10 = preservesHDR10 && PixelConverter.isHDR10PQ(pixel)
+            let matrix = CVBufferCopyAttachment(pixel, kCVImageBufferYCbCrMatrixKey, nil) as? String
+            let validColor: Bool
+            if isHDR10 {
+                validColor =
+                    matrix == nil
+                    || matrix == kCVImageBufferYCbCrMatrix_ITU_R_2020 as String
+                    || matrix == kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String
+            } else if let colorSpace = CVBufferCopyAttachment(pixel, kCVImageBufferCGColorSpaceKey, nil),
                 CFEqual(colorSpace, PixelConverter.rec709),
-                (CVBufferCopyAttachment(pixel, kCVImageBufferYCbCrMatrixKey, nil) as? String)
-                    == kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String,
+                matrix == kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String
+            {
+                validColor = true
+            } else {
+                validColor = false
+            }
+            guard validColor,
                 ((CVBufferCopyAttachment(pixel, kCVImageBufferFieldCountKey, nil) as? NSNumber)?.intValue ?? 1) == 1,
                 let siting = PixelConverter.chromaSitingOffset(of: pixel)
             else { return }
@@ -459,7 +507,7 @@ final class FlowInterpolator {
             else { return }
             reference = Reference(
                 frame: frame, image: lumaView, chroma: chromaView,
-                chromaOffset: siting / SIMD2(Float(input.width), Float(input.height)))
+                chromaOffset: siting / SIMD2(Float(input.width), Float(input.height)), isHDR10PQ: isHDR10)
         }
         return reference
     }
@@ -489,9 +537,34 @@ final class FlowInterpolator {
         inline bool isFiniteHalf(half value) {
             return (as_type<ushort>(value) & 0x7C00u) != 0x7C00u;
         }
-        inline half3 nv12Color(half luma, half2 chroma) {
+        inline half3 nv12Color(half luma, half2 chroma, uint hdrMode) {
             half y = fma(luma, half(255.0 / 219.0), half(-16.0 / 219.0));
             half2 cbcr = fma(chroma, half(255.0 / 224.0), half(-128.0 / 224.0));
+            if (hdrMode == 3u) {
+                half yClamped = saturate(y);
+                return saturate(half3(
+                    fma(half(1.4746), cbcr.y, yClamped),
+                    fma(half(-0.5713531), cbcr.y, fma(half(-0.1645531), cbcr.x, yClamped)),
+                    fma(half(1.8814), cbcr.x, yClamped)));
+            }
+            if (hdrMode >= 1u) {
+                half yPos = max(half(0.0), y);
+                half yAnchored;
+                half2 cBoost;
+                if (hdrMode == 2u) {
+                    half t = saturate(yPos * half(1.0 / 0.08));
+                    yAnchored = yPos * mix(half(0.25), half(1.0), t);
+                    cBoost = cbcr * mix(half(0.75), half(1.12), t);
+                } else {
+                    yAnchored = max(half(0.0), (yPos - half(0.042)) * half(1.0 / 0.958));
+                    cBoost = cbcr * half(1.12);
+                }
+                half3 rgb = saturate(half3(
+                    fma(half(1.4746), cBoost.y, yAnchored),
+                    fma(half(-0.57135), cBoost.y, fma(half(-0.16455), cBoost.x, yAnchored)),
+                    fma(half(1.8814), cBoost.x, yAnchored)));
+                return saturate(pow(rgb, half3(1.10)));
+            }
             return saturate(half3(
                 fma(half(1.5748), cbcr.y, y),
                 fma(half(-0.468124), cbcr.y, fma(half(-0.187324), cbcr.x, y)),
@@ -499,10 +572,10 @@ final class FlowInterpolator {
         }
         // chromaOffset moves from chroma texel centers to the sample positions of the surface's 4:2:0 siting.
         inline half3 colorAt(texture2d<half, access::sample> image, texture2d<half, access::sample> chroma, float2 uv,
-                             float2 chromaOffset) {
+                             float2 chromaOffset, uint hdrMode) {
             half3 value = image.sample(linearSampler, uv).rgb;
             if (!nv12) return value;
-            return nv12Color(value.r, chroma.sample(linearSampler, uv + chromaOffset).rg);
+            return nv12Color(value.r, chroma.sample(linearSampler, uv + chromaOffset).rg, hdrMode);
         }
         inline half valid(float2 p) { return all(p >= 0.0f) && all(p <= 1.0f) ? half(1.0) : half(0.0); }
         inline float2 flowAt(texture2d<half, access::sample> field, float2 uv) {
@@ -513,19 +586,20 @@ final class FlowInterpolator {
                               texture2d<half, access::write> output [[texture(1)]],
                               texture2d<half, access::sample> chroma [[texture(2), function_constant(nv12)]],
                               constant float2 &chromaOffset [[buffer(0)]],
+                              constant uint &hdrMode [[buffer(1)]],
                               uint2 gid [[thread_position_in_grid]]) {
             if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
             float2 outSize = float2(output.get_width(), output.get_height());
             float2 base = (float2(gid) + 0.5f) / outSize;
             half3 color;
             if (image.get_width() == output.get_width() && image.get_height() == output.get_height()) {
-                color = colorAt(image, chroma, base, chromaOffset);
+                color = colorAt(image, chroma, base, chromaOffset, hdrMode);
             } else {
                 float2 offset = 0.25f / outSize;
-                color = (colorAt(image, chroma, base + float2(-offset.x, -offset.y), chromaOffset)
-                       + colorAt(image, chroma, base + float2( offset.x, -offset.y), chromaOffset)
-                       + colorAt(image, chroma, base + float2(-offset.x,  offset.y), chromaOffset)
-                       + colorAt(image, chroma, base + float2( offset.x,  offset.y), chromaOffset)) * half(0.25);
+                color = (colorAt(image, chroma, base + float2(-offset.x, -offset.y), chromaOffset, hdrMode)
+                       + colorAt(image, chroma, base + float2( offset.x, -offset.y), chromaOffset, hdrMode)
+                       + colorAt(image, chroma, base + float2(-offset.x,  offset.y), chromaOffset, hdrMode)
+                       + colorAt(image, chroma, base + float2( offset.x,  offset.y), chromaOffset, hdrMode)) * half(0.25);
             }
             output.write(half4(saturate(color), half(1.0)), gid);
         }
@@ -538,6 +612,7 @@ final class FlowInterpolator {
                                 texture2d<half, access::sample> bChroma [[texture(6), function_constant(nv12)]],
                                 constant float4 &parameters [[buffer(0)]],
                                 constant float4 &chromaOffsets [[buffer(1)]],
+                                constant uint &hdrMode [[buffer(2)]],
                                 uint2 gid [[thread_position_in_grid]]) {
             if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
             float2 uv = (float2(gid) + 0.5f) / float2(output.get_width(), output.get_height());
@@ -550,7 +625,8 @@ final class FlowInterpolator {
             if (!lowMotion && motionSum < parameters.w) {
                 // An unchanged pixel under small estimated motion keeps its exact source value, so static
                 // fine detail does not alternate between source and resampled images.
-                half3 originalA = colorAt(a, aChroma, uv, aOffset), originalB = colorAt(b, bChroma, uv, bOffset);
+                half3 originalA = colorAt(a, aChroma, uv, aOffset, hdrMode);
+                half3 originalB = colorAt(b, bChroma, uv, bOffset, hdrMode);
                 if (length(originalA - originalB) < half(0.006)) {
                     output.write(half4(originalA, half(1.0)), gid);
                     return;
@@ -558,7 +634,8 @@ final class FlowInterpolator {
             }
             half3 fallbackColor = half3(0.0);
             if (lowMotion) {
-                half3 originalA = colorAt(a, aChroma, uv, aOffset), originalB = colorAt(b, bChroma, uv, bOffset);
+                half3 originalA = colorAt(a, aChroma, uv, aOffset, hdrMode);
+                half3 originalB = colorAt(b, bChroma, uv, bOffset, hdrMode);
                 if (length(originalA - originalB) < half(0.006)) {
                     output.write(half4(originalA, half(1.0)), gid);
                     return;
@@ -574,11 +651,11 @@ final class FlowInterpolator {
             float2 f = flowAt(forward, p);
             float2 r = flowAt(backward, q);
             float2 nextP = p + f * invFlowSize, previousQ = q + r * invFlowSize;
-            half3 ca = colorAt(a, aChroma, p, aOffset), cb = colorAt(b, bChroma, q, bOffset);
+            half3 ca = colorAt(a, aChroma, p, aOffset, hdrMode), cb = colorAt(b, bChroma, q, bOffset, hdrMode);
             half errorA = half(min(length(f + flowAt(backward, nextP)), 100.0f));
             half errorB = half(min(length(r + flowAt(forward, previousQ)), 100.0f));
-            half photoA = length(ca - colorAt(b, bChroma, nextP, bOffset));
-            half photoB = length(cb - colorAt(a, aChroma, previousQ, aOffset));
+            half photoA = length(ca - colorAt(b, bChroma, nextP, bOffset, hdrMode));
+            half photoB = length(cb - colorAt(a, aChroma, previousQ, aOffset, hdrMode));
             half hPhase = half(phase);
             half wa = valid(p) * valid(nextP) * exp(fma(half(-8.0), photoA, half(-0.7) * errorA)) * (half(1.0) - hPhase);
             half wb = valid(q) * valid(previousQ) * exp(fma(half(-8.0), photoB, half(-0.7) * errorB)) * hPhase;
@@ -588,7 +665,7 @@ final class FlowInterpolator {
             half3 color;
             if (weightSum < half(0.05)) {
                 if (lowMotion) color = fallbackColor;
-                else color = phase < 0.5f ? colorAt(a, aChroma, uv, aOffset) : colorAt(b, bChroma, uv, bOffset);
+                else color = phase < 0.5f ? colorAt(a, aChroma, uv, aOffset, hdrMode) : colorAt(b, bChroma, uv, bOffset, hdrMode);
             } else {
                 color = (wa * ca + wb * cb) / weightSum;
                 if (selectOcclusion && !lowMotion && length(ca - cb) > half(0.08)) {

@@ -43,11 +43,15 @@ final class PixelBufferPool {
         try pool.makeMutablePixelBuffer(.init(allocationThreshold: allocationThreshold))
     }
 
-    func makeVTFrame(at time: CMTime) throws -> VTFrameProcessorFrame {
+    func makeVTFrame(at time: CMTime, hdr10PQ: Bool = false) throws -> VTFrameProcessorFrame {
         let buffer = try makeMutable()
         var output: VTFrameProcessorFrame?
         buffer.withUnsafeBuffer { raw in
-            PixelConverter.attach709(to: raw)
+            if hdr10PQ {
+                PixelConverter.attachHDR10PQ(to: raw)
+            } else {
+                PixelConverter.attach709(to: raw)
+            }
             output = VTFrameProcessorFrame(buffer: raw, presentationTimeStamp: time)
         }
         guard let output else {
@@ -110,49 +114,84 @@ final class PixelConverter {
         return false
     }
 
-    func render(_ image: CIImage, pool: PixelBufferPool) throws -> CVReadOnlyPixelBuffer {
+    func render(_ image: CIImage, pool: PixelBufferPool, hdr10PQ: Bool = false) throws -> CVReadOnlyPixelBuffer {
         let buffer = try pool.makeMutable()
         try buffer.withUnsafeBuffer { raw in
             // Capture may reuse a directly copied buffer for a Core Image fallback.
             CVBufferRemoveAllAttachments(raw)
-            Self.attach709(to: raw)
+            if hdr10PQ {
+                Self.attachHDR10PQ(to: raw)
+            } else {
+                Self.attach709(to: raw)
+            }
             // Wait for this conversion before handing the surface to an independent VT queue.
             let destination = CIRenderDestination(pixelBuffer: raw)
-            destination.colorSpace = Self.rec709
+            destination.colorSpace = hdr10PQ ? Self.itur2100PQ : Self.rec709
             let task = try context.startTask(toRender: image, to: destination)
             _ = try task.waitUntilCompleted()
         }
         return CVReadOnlyPixelBuffer(buffer)
     }
 
-    func convert(_ frame: VideoFrame, pool: PixelBufferPool) throws -> VideoFrame {
-        let format = frame.pixelBuffer.withUnsafeBuffer { CVPixelBufferGetPixelFormatType($0) }
+    func convert(_ frame: VideoFrame, pool: PixelBufferPool, preserveHDR10: Bool = false) throws -> VideoFrame {
+        let (format, isHDR10) = frame.pixelBuffer.withUnsafeBuffer {
+            (CVPixelBufferGetPixelFormatType($0), preserveHDR10 && Self.isHDR10PQ($0))
+        }
         if frame.size == pool.size,
             format == pool.format,
             format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange || format == kCVPixelFormatType_32BGRA
         {
-            return try copy(frame, pool: pool)
+            return try copy(frame, pool: pool, hdr10PQ: isHDR10)
         }
         let image = frame.pixelBuffer.withUnsafeBuffer { CIImage(cvPixelBuffer: $0) }
         return VideoFrame(
-            pixelBuffer: try render(image, pool: pool), presentationTime: frame.presentationTime,
+            pixelBuffer: try render(image, pool: pool, hdr10PQ: isHDR10), presentationTime: frame.presentationTime,
             duration: frame.duration, sequence: frame.sequence, arrivalTime: frame.arrivalTime,
             contentRect: frame.contentRect, windowStamp: frame.windowStamp)
     }
 
-    private func copy(_ frame: VideoFrame, pool: PixelBufferPool) throws -> VideoFrame {
+    private func copy(_ frame: VideoFrame, pool: PixelBufferPool, hdr10PQ: Bool = false) throws -> VideoFrame {
         let buffer = try pool.makeMutable()
         try frame.pixelBuffer.withUnsafeBuffer { source in
             try buffer.withUnsafeBuffer { destination in
                 try Self.copyPlanes(from: source, to: destination)
                 Self.replacePropagatedAttachments(from: source, to: destination)
-                Self.attach709(to: destination)
+                if hdr10PQ {
+                    Self.attachHDR10PQ(to: destination)
+                } else {
+                    Self.attach709(to: destination)
+                }
             }
         }
         return VideoFrame(
             pixelBuffer: CVReadOnlyPixelBuffer(buffer), presentationTime: frame.presentationTime,
             duration: frame.duration, sequence: frame.sequence, arrivalTime: frame.arrivalTime,
             contentRect: frame.contentRect, windowStamp: frame.windowStamp)
+    }
+
+    /// Copies a completed mutable/VT output buffer into an owned read-only pool buffer without a Core Image
+    /// color round-trip, preserving exact YCbCr/BGRA bytes and HDR10 PQ or Rec.709 color attachments.
+    func copyReadOnly(from source: CVPixelBuffer, pool: PixelBufferPool, hdr10PQ: Bool) throws -> CVReadOnlyPixelBuffer
+    {
+        if CVPixelBufferGetPixelFormatType(source) == pool.format,
+            CVPixelBufferGetWidth(source) == pool.size.width,
+            CVPixelBufferGetHeight(source) == pool.size.height,
+            pool.format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                || pool.format == kCVPixelFormatType_32BGRA
+        {
+            let buffer = try pool.makeMutable()
+            try buffer.withUnsafeBuffer { destination in
+                try Self.copyPlanes(from: source, to: destination)
+                Self.replacePropagatedAttachments(from: source, to: destination)
+                if hdr10PQ {
+                    Self.attachHDR10PQ(to: destination)
+                } else {
+                    Self.attach709(to: destination)
+                }
+            }
+            return CVReadOnlyPixelBuffer(buffer)
+        }
+        return try render(CIImage(cvPixelBuffer: source), pool: pool, hdr10PQ: hdr10PQ)
     }
 
     private static let parallelCopyByteThreshold = 6_000_000
