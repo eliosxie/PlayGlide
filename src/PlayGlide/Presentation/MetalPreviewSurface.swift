@@ -139,10 +139,10 @@ final class PreviewImageRenderer {
     static var bilateralChromaEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_BILATERAL_CHROMA"] == "1"
     }
-    /// Gradient-preserving 4-tap debanding for 8-bit UVC HDR10 PQ inputs before YCbCr→RGB decode
-    /// (`PLAYGLIDE_HDR10_DEBAND=1`). Strictly bypasses high-contrast text and micro-texture edges.
+    /// Gradient-preserving 2-tap symmetric luma debanding for 8-bit UVC HDR10 PQ inputs before YCbCr→RGB decode
+    /// (`PLAYGLIDE_HDR10_DEBAND=0` opts out for A/B rollback). Strictly bypasses high-contrast text and micro-texture edges.
     static var hdr10DebandEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_HDR10_DEBAND"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_HDR10_DEBAND"] != "0"
     }
 
     private let device: any MTLDevice

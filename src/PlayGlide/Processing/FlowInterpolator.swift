@@ -98,9 +98,9 @@ final class FlowInterpolator {
     static let defaultStaticFlowLimit: Float = 4
     /// Preserve HDR10 PQ pixel encoding and BT.2020/ST.2084 attachments across explicit optical-flow and
     /// VideoToolbox FRC backends so generated frames match original frame luminance and color
-    /// (`PLAYGLIDE_FLOW_HDR_PASSTHROUGH=1`).
+    /// (`PLAYGLIDE_FLOW_HDR_PASSTHROUGH=0` opts out for A/B rollback).
     static var hdrPassthroughEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_FLOW_HDR_PASSTHROUGH"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_FLOW_HDR_PASSTHROUGH"] != "0"
     }
     private let staticFlowLimit: Float
     private let preservesHDR10: Bool

@@ -11,16 +11,16 @@ final class SpatialUpscaler {
         case float16
     }
 
-    /// Selects MetalFX Spatial intermediate texture precision (`PLAYGLIDE_SPATIAL_10BIT=1` for 10-bit
-    /// `.bgr10a2Unorm`/`.rgb10a2Unorm`, `=fp16` for `.rgba16Float`, default `.unorm8` pending hardware A/B).
+    /// Selects MetalFX Spatial intermediate texture precision (default 10-bit `.bgr10a2Unorm`/`.rgb10a2Unorm`;
+    /// set `PLAYGLIDE_SPATIAL_10BIT=0` for 8-bit `.bgra8Unorm` A/B rollback, or `=fp16` for `.rgba16Float`).
     static var configuredPrecision: Precision {
         switch ProcessInfo.processInfo.environment["PLAYGLIDE_SPATIAL_10BIT"]?.lowercased() {
-        case "1", "true", "10", "10bit":
-            return .unorm10
+        case "0", "false", "8", "8bit":
+            return .unorm8
         case "fp16", "16", "float16":
             return .float16
         default:
-            return .unorm8
+            return .unorm10
         }
     }
 

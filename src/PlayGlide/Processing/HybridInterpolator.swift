@@ -84,8 +84,10 @@ final class HybridInterpolator {
     static var lazyResourcesEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_HYBRID_LAZY_RESOURCES"] != "0"
     }
+    /// Contrast-gated background motion borrowing around static high-contrast HUD text
+    /// (`PLAYGLIDE_HYBRID_HUD_DEHALO=0` opts out for A/B rollback).
     static var hudDehaloEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_HYBRID_HUD_DEHALO"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_HYBRID_HUD_DEHALO"] != "0"
     }
     static var spatialDeferredComposeEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_SPATIAL_DEFERRED_COMPOSE"] == "1"
@@ -111,17 +113,21 @@ final class HybridInterpolator {
     static var fusedCPUShrinkEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_FUSED_CPU_SHRINK"] == "1"
     }
-    static let spatialMovingDetailEnabled =
-        ProcessInfo.processInfo.environment["PLAYGLIDE_SPATIAL_MOVING_DETAIL"] == "1"
+    /// Preserve paired moving-detail sharpness on MetalFX Spatial 4K paths without disturbing static HUD
+    /// (`PLAYGLIDE_SPATIAL_MOVING_DETAIL=0` opts out for A/B rollback).
+    static var spatialMovingDetailEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_SPATIAL_MOVING_DETAIL"] != "0"
+    }
     /// Protect fast-moving small icons crossing smooth static backgrounds via local 3×3 envelope
-    /// breakout gating without degrading high-contrast static text (`PLAYGLIDE_HYBRID_ICON_ENVELOPE=1`).
+    /// breakout gating without degrading high-contrast static text (`PLAYGLIDE_HYBRID_ICON_ENVELOPE=0` opts out).
     static var iconEnvelopeEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_HYBRID_ICON_ENVELOPE"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_HYBRID_ICON_ENVELOPE"] != "0"
     }
     /// Modulate midpoint CAS inversely with motion-detail confidence `(1 - 0.65 * conf)` so occlusion fallback
-    /// regions match native 4K sharpness without over-sharpening recovered moving detail (`PLAYGLIDE_ADAPTIVE_CAS=1`).
+    /// regions match native 4K sharpness without over-sharpening recovered moving detail (`PLAYGLIDE_ADAPTIVE_CAS=0`
+    /// opts out for A/B rollback).
     static var adaptiveCASEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_ADAPTIVE_CAS"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_ADAPTIVE_CAS"] != "0"
     }
 
     let input: VideoSize
