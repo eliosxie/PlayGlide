@@ -1512,11 +1512,28 @@ final class PreviewImageRenderer {
             texture2d<half, access::sample> lowMid, texture2d<half, access::sample> lowMidChroma,
             float2 uv
         ) {
+            // Exact center early-out: neighbor extrema can only widen [min, max], so if the center
+            // midpoint sample already lies within the breakout thresholds of lowA/lowB at uv, the full
+            // 3x3 + +/-2 envelope is mathematically guaranteed to return 0.0.
+            half midY = saturate(previewNv12Luma(lowMid.sample(previewSampler, uv).r));
+            half a0 = saturate(previewNv12Luma(lowA.sample(previewSampler, uv).r));
+            half b0 = saturate(previewNv12Luma(lowB.sample(previewSampler, uv).r));
+            half minY = min(a0, b0);
+            half maxY = max(a0, b0);
+            half2 midC = lowMidChroma.sample(previewSampler, uv).rg;
+            half2 ca0 = lowAChroma.sample(previewSampler, uv).rg;
+            half2 cb0 = lowBChroma.sample(previewSampler, uv).rg;
+            half2 minC = min(ca0, cb0);
+            half2 maxC = max(ca0, cb0);
+            half centerLumaBreak = max(half(0.0), max(minY - midY, midY - maxY));
+            half2 centerChromaOver = max(half2(0.0), max(minC - midC, midC - maxC)) * half(255.0 / 224.0);
+            if (centerLumaBreak <= half(0.065) && length(centerChromaOver) <= half(0.055)) {
+                return half(0.0);
+            }
             float2 lStep = 1.0f / float2(lowA.get_width(), lowA.get_height());
-            half minY = half(1.0);
-            half maxY = half(0.0);
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
                     float2 p = uv + float2(float(dx), float(dy)) * lStep;
                     half ya = saturate(previewNv12Luma(lowA.sample(previewSampler, p).r));
                     half yb = saturate(previewNv12Luma(lowB.sample(previewSampler, p).r));
@@ -1538,10 +1555,9 @@ final class PreviewImageRenderer {
             half rangeY = maxY - minY;
             if (rangeY >= half(0.08)) return half(0.0);
             float2 cStep = 1.0f / float2(lowAChroma.get_width(), lowAChroma.get_height());
-            half2 minC = half2(1.0);
-            half2 maxC = half2(0.0);
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
                     float2 p = uv + float2(float(dx), float(dy)) * cStep;
                     half2 ca = lowAChroma.sample(previewSampler, p).rg;
                     half2 cb = lowBChroma.sample(previewSampler, p).rg;
@@ -1552,8 +1568,6 @@ final class PreviewImageRenderer {
             half2 rangeC = (maxC - minC) * half(255.0 / 224.0);
             half maxRangeC = max(rangeC.x, rangeC.y);
             if (maxRangeC >= half(0.07)) return half(0.0);
-            half midY = saturate(previewNv12Luma(lowMid.sample(previewSampler, uv).r));
-            half2 midC = lowMidChroma.sample(previewSampler, uv).rg;
             half lumaBreak = max(half(0.0), max(minY - midY, midY - maxY));
             half2 chromaOver = max(half2(0.0), max(minC - midC, midC - maxC)) * half(255.0 / 224.0);
             half chromaBreak = length(chromaOver);
