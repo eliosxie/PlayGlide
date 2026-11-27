@@ -32,6 +32,12 @@ struct SessionInspector: View {
                             ForEach(InputColorMode.allCases) { Text($0.title.localized(in: language)).tag($0) }
                         }
                         if model.draft.colorMode != .sdrRec709 {
+                            Picker(
+                                language.text("HDR 画面风格", "HDR Tone Style"),
+                                selection: $model.draft.hdrDisplayStyle
+                            ) {
+                                ForEach(HDRDisplayStyle.allCases) { Text($0.title.localized(in: language)).tag($0) }
+                            }
                             Picker(language.text("显示器 HDR", "Display HDR"), selection: $model.draft.systemHDRPolicy) {
                                 ForEach(SystemHDRPolicy.allCases) { Text($0.title.localized(in: language)).tag($0) }
                             }

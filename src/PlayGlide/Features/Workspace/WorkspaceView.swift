@@ -273,6 +273,7 @@ private struct PreviewPanel: View {
                 immersive: model.immersive,
                 roundedCorners: !model.previewOnly,
                 hdr10Active: model.effectiveHDR10Active,
+                hdrDisplayStyle: model.draft.hdrDisplayStyle,
                 onPointerMove: { model.revealFullscreenControls() },
                 onDisplayIDChange: { model.setPreviewDisplayID($0) }
             )

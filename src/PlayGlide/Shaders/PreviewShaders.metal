@@ -82,12 +82,21 @@ inline half3 finalizePreviewColor(half3 rgb, float colorMode) {
     }
     return rgb;
 }
-inline half3 decodeYCbCr(half y, half2 cbcr, bool bt2020, bool softToe) {
-    if (bt2020) {
+inline half3 decodeYCbCr(half y, half2 cbcr, uint hdrMode) {
+    if (hdrMode == 3u) {
+        // ITU-R BT.2100 / BT.2020 reference PQ decode: exact non-constant-luminance matrix,
+        // no chroma boost, and no shadow gamma crush (PLAYGLIDE_HDR10_REFERENCE_PQ=1 / Reference style).
+        half yClamped = saturate(y);
+        return saturate(half3(
+            fma(half(1.4746), cbcr.y, yClamped),
+            fma(half(-0.5713531), cbcr.y, fma(half(-0.1645531), cbcr.x, yClamped)),
+            fma(half(1.8814), cbcr.x, yClamped)));
+    }
+    if (hdrMode >= 1u) {
         half yPos = max(half(0.0), y);
         half yAnchored;
         half2 cBoost;
-        if (softToe) {
+        if (hdrMode == 2u) {
             // C1-smooth near-black toe: Y=16 maps to strict 0.0 OLED black while keeping Y=17..33 shadow steps.
             half t = saturate(yPos * half(1.0 / 0.08));
             yAnchored = yPos * mix(half(0.25), half(1.0), t);
@@ -163,8 +172,7 @@ inline half3 sampleSource(
     float2 normalized = (px - src.fitRect.xy) * src.fitRect.zw;
     float2 uv = clamp(fma(normalized, src.uvRect.zw, src.uvRect.xy), src.clampRect.xy, src.clampRect.zw);
     half3 rgb;
-    bool bt2020 = src.flags.x > 1.5f;
-    bool softToe = src.flags.x > 2.5f;
+    uint hdrMode = src.flags.x > 1.5f ? uint(src.flags.x - 0.5f) : 0u;
     if (src.fitMax.z > 0.0f) {
         float2 d = src.fitMax.zw;
         float2 uv0 = clamp(uv + float2(-d.x, -d.y), src.clampRect.xy, src.clampRect.zw);
@@ -182,7 +190,7 @@ inline half3 sampleSource(
                           + chromaTex.sample(previewSampler, uv3 + src.flags.zw).rg) * half(0.25);
             half y = fma(luma, half(255.0 / 219.0), half(-16.0 / 219.0));
             half2 cbcr = fma(chroma, half(255.0 / 224.0), half(-128.0 / 224.0));
-            rgb = decodeYCbCr(y, cbcr, bt2020, softToe);
+            rgb = decodeYCbCr(y, cbcr, hdrMode);
         } else {
             rgb = (primaryTex.sample(previewSampler, uv0).rgb
                  + primaryTex.sample(previewSampler, uv1).rgb
@@ -197,7 +205,7 @@ inline half3 sampleSource(
             ? sampleBilateralChroma(primaryTex, chromaTex, uv, src.flags.zw, rawY)
             : chromaTex.sample(previewSampler, uv + src.flags.zw).rg;
         half2 cbcr = fma(chroma, half(255.0 / 224.0), half(-128.0 / 224.0));
-        rgb = decodeYCbCr(y, cbcr, bt2020, softToe);
+        rgb = decodeYCbCr(y, cbcr, hdrMode);
     } else {
         rgb = primaryTex.sample(previewSampler, uv).rgb;
     }
@@ -319,7 +327,7 @@ inline void sampleStaticPlane(
 }
 inline half3 previewLowBlur(
     texture2d<half, access::sample> luma, texture2d<half, access::sample> chroma,
-    float2 uv, bool bt2020, bool softToe
+    float2 uv, uint hdrMode
 ) {
     float2 step = 1.0f / float2(luma.get_width(), luma.get_height());
     half y = (luma.sample(previewSampler, uv + float2(-step.x, -step.y)).r
@@ -327,7 +335,7 @@ inline half3 previewLowBlur(
             + luma.sample(previewSampler, uv + float2(-step.x, step.y)).r
             + luma.sample(previewSampler, uv + float2(step.x, step.y)).r) * half(0.25);
     half2 cbcr = fma(chroma.sample(previewSampler, uv).rg, half(255.0 / 224.0), half(-128.0 / 224.0));
-    return decodeYCbCr(previewNv12Luma(y), cbcr, bt2020, softToe);
+    return decodeYCbCr(previewNv12Luma(y), cbcr, hdrMode);
 }
 // Local 3x3 envelope breakout with low-contrast background gating: keeps static fine text at staticW == 1.0
 // while preserving fast-moving midpoint icons gliding over smooth static backgrounds.
@@ -451,14 +459,13 @@ kernel void previewSelectMotion(
     float2 lowStep = 1.0f / lowSize;
     float2 uv = (float2(gid) + 0.5f) / float2(w, h);
     uint motionFlags = uint(motionScale.w + 0.5f);
-    bool bt2020 = (motionFlags & 3u) >= 1u;
-    bool softToe = (motionFlags & 3u) >= 2u;
+    uint hdrMode = motionFlags & 3u;
     bool hudDehalo = (motionFlags & 8u) != 0u;
     bool safeFinite = (motionFlags & 16u) != 0u;
     bool lowStatic = false;
     if (weights.y > 0.5f) {
-        half3 la = previewLowBlur(lowA, lowAChroma, uv, bt2020, softToe);
-        half3 lb = previewLowBlur(lowB, lowBChroma, uv, bt2020, softToe);
+        half3 la = previewLowBlur(lowA, lowAChroma, uv, hdrMode);
+        half3 lb = previewLowBlur(lowB, lowBChroma, uv, hdrMode);
         lowStatic = length(la - lb) < half(0.012);
     }
     half2 centerRaw = motion.sample(previewNearestSampler, uv).rg;
@@ -695,8 +702,7 @@ fragment half4 previewHybridFragment(
     }
     float2 normalized = (px - src.fitRect.xy) * src.fitRect.zw;
     float2 uv = clamp(fma(normalized, src.uvRect.zw, src.uvRect.xy), src.clampRect.xy, src.clampRect.zw);
-    bool bt2020 = src.flags.x > 1.5f;
-    bool softToe = src.flags.x > 2.5f;
+    uint hdrMode = src.flags.x > 1.5f ? uint(src.flags.x - 0.5f) : 0u;
     float colorMode = src.flags.y;
     half4 md = half4(0.0);
     bool lowStatic = false;
@@ -705,8 +711,8 @@ fragment half4 previewHybridFragment(
         lowStatic = md.z >= half(1.5);
         if (lowStatic) md.z -= half(2.0);
     } else if (u.weights.y > 0.5f) {
-        half3 la = previewLowBlur(lowATex, lowAChroma, uv, bt2020, softToe);
-        half3 lb = previewLowBlur(lowBTex, lowBChroma, uv, bt2020, softToe);
+        half3 la = previewLowBlur(lowATex, lowAChroma, uv, hdrMode);
+        half3 lb = previewLowBlur(lowBTex, lowBChroma, uv, hdrMode);
         lowStatic = length(la - lb) < half(0.012);
     }
     float t = u.weights.x;
@@ -733,7 +739,7 @@ fragment half4 previewHybridFragment(
         half dY = (yA - yB) * half(255.0 / 219.0);
         half2 dCbCr = (caUV - cbUV) * half(255.0 / 224.0);
         half dR, dG, dB;
-        if (bt2020 && softToe) {
+        if (hdrMode >= 2u) {
             dR = dY + half(1.4746) * dCbCr.y;
             dG = dY + fma(half(-0.57135), dCbCr.y, half(-0.16455) * dCbCr.x);
             dB = dY + half(1.8814) * dCbCr.x;
@@ -769,7 +775,7 @@ fragment half4 previewHybridFragment(
                 yStatic = previewApplyLumaRCAS(yStatic, yN, yS, yE, yW, rcasStrength);
             }
             half2 cbcrStatic = fma(mix(caUV, cbUV, tHalf), half(255.0 / 224.0), half(-128.0 / 224.0));
-            half3 rgb = finalizePreviewColor(decodeYCbCr(yStatic, cbcrStatic, bt2020, softToe), colorMode);
+            half3 rgb = finalizePreviewColor(decodeYCbCr(yStatic, cbcrStatic, hdrMode), colorMode);
             if (u.split.z > 0.0f) rgb = saturate(rgb + half3(triangularDither(px) * half(u.split.z)));
             return half4(rgb, half(1.0));
         }
@@ -981,7 +987,7 @@ fragment half4 previewHybridFragment(
             saturate(y + (rE - rC)), saturate(y + (rW - rC)), rcasStrength);
     }
     half2 cbcr = fma(outChroma, half(255.0 / 224.0), half(-128.0 / 224.0));
-    half3 rgb = finalizePreviewColor(decodeYCbCr(y, cbcr, bt2020, softToe), colorMode);
+    half3 rgb = finalizePreviewColor(decodeYCbCr(y, cbcr, hdrMode), colorMode);
     if (u.split.z > 0.0f) rgb = saturate(rgb + half3(triangularDither(px) * half(u.split.z)));
     return half4(rgb, half(1.0));
 }

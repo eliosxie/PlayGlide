@@ -14,6 +14,7 @@ struct SessionDraft: Sendable, Equatable {
     var deviceID = ""
     var formatID = ""
     var colorMode: InputColorMode = .sdrRec709
+    var hdrDisplayStyle: HDRDisplayStyle = .defaultStyle
     var systemHDRPolicy: SystemHDRPolicy = .fullscreen
     var audioEnabled = false
     // Empty selects the chosen video device's own audio ports, never the default microphone.
@@ -108,6 +109,7 @@ struct SessionPreferences: Sendable, Equatable, Codable {
     var deviceID = ""
     var formatID = ""
     var colorMode: InputColorMode = .sdrRec709
+    var hdrDisplayStyle: HDRDisplayStyle = .defaultStyle
     var systemHDRPolicy: SystemHDRPolicy = .fullscreen
     var audioEnabled = false
     var audioDeviceID = ""
@@ -128,6 +130,7 @@ struct SessionPreferences: Sendable, Equatable, Codable {
         deviceID = draft.deviceID
         formatID = draft.formatID
         colorMode = draft.colorMode
+        hdrDisplayStyle = draft.hdrDisplayStyle
         systemHDRPolicy = draft.systemHDRPolicy
         audioEnabled = draft.audioEnabled
         audioDeviceID = draft.audioDeviceID
@@ -151,6 +154,9 @@ struct SessionPreferences: Sendable, Equatable, Codable {
         deviceID = try container.decodeIfPresent(String.self, forKey: .deviceID) ?? ""
         formatID = try container.decodeIfPresent(String.self, forKey: .formatID) ?? ""
         colorMode = try container.decodeIfPresent(InputColorMode.self, forKey: .colorMode) ?? .sdrRec709
+        hdrDisplayStyle =
+            try container.decodeIfPresent(HDRDisplayStyle.self, forKey: .hdrDisplayStyle)
+            ?? HDRDisplayStyle.defaultStyle
         systemHDRPolicy =
             try container.decodeIfPresent(SystemHDRPolicy.self, forKey: .systemHDRPolicy) ?? .fullscreen
         audioEnabled = try container.decodeIfPresent(Bool.self, forKey: .audioEnabled) ?? false
@@ -173,6 +179,7 @@ struct SessionPreferences: Sendable, Equatable, Codable {
         draft.deviceID = deviceID
         draft.formatID = formatID
         draft.colorMode = colorMode
+        draft.hdrDisplayStyle = hdrDisplayStyle
         draft.systemHDRPolicy = systemHDRPolicy
         draft.audioEnabled = audioEnabled
         draft.audioDeviceID = audioDeviceID
@@ -282,6 +289,23 @@ enum InputColorMode: String, CaseIterable, Identifiable, Sendable, Codable {
         case .sdrRec709: "SDR · Rec.709"
         case .hdr10PQ: "HDR10 · BT.2020 PQ"
         case .automatic: AppText("自动识别（跟随信号 SDR / HDR10）", "Auto (SDR / HDR10)")
+        }
+    }
+}
+
+enum HDRDisplayStyle: String, CaseIterable, Identifiable, Sendable, Codable {
+    /// Use strict ITU-R BT.2100 PQ Y'CbCr → R'G'B' decode without shadow gamma crush or chroma boost
+    /// (`PLAYGLIDE_HDR10_REFERENCE_PQ=1` selects `.reference` by default).
+    static var defaultStyle: Self {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_HDR10_REFERENCE_PQ"] == "1" ? .reference : .enhanced
+    }
+
+    case enhanced, reference
+    var id: Self { self }
+    var title: AppText {
+        switch self {
+        case .enhanced: AppText("增强对比（默认）", "Enhanced Contrast (Default)")
+        case .reference: AppText("精准参考（BT.2100 PQ）", "Reference (BT.2100 PQ)")
         }
     }
 }

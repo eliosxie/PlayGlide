@@ -26,12 +26,20 @@ inline half3 sourceColor(texture2d<half, access::sample> image, texture2d<half, 
     if (!nv12) return value;
     return nv12Color(value.r, chroma.sample(linearSampler, uv + offset).rg);
 }
-inline half3 decodeLowYCbCr(half y, half2 cbcr, bool bt2020, bool softToe) {
-    if (bt2020) {
+inline half3 decodeLowYCbCr(half y, half2 cbcr, uint hdrMode) {
+    if (hdrMode == 3u) {
+        // Strict ITU-R BT.2100 / BT.2020 non-constant-luminance PQ decode without chroma boost or gamma crush.
+        half yClamped = saturate(y);
+        return saturate(half3(
+            fma(half(1.4746), cbcr.y, yClamped),
+            fma(half(-0.5713531), cbcr.y, fma(half(-0.1645531), cbcr.x, yClamped)),
+            fma(half(1.8814), cbcr.x, yClamped)));
+    }
+    if (hdrMode >= 1u) {
         half yPos = max(half(0.0), y);
         half yAnchored;
         half2 cBoost;
-        if (softToe) {
+        if (hdrMode == 2u) {
             half t = saturate(yPos * half(1.0 / 0.08));
             yAnchored = yPos * mix(half(0.25), half(1.0), t);
             cBoost = cbcr * mix(half(0.75), half(1.12), t);
@@ -52,15 +60,15 @@ inline half3 decodeLowYCbCr(half y, half2 cbcr, bool bt2020, bool softToe) {
 }
 // Low-frequency color over about three downscaled pixels; ignores moire that VT adds to fine detail.
 inline half3 lowBlur(texture2d<half, access::sample> luma, texture2d<half, access::sample> chroma,
-                     float2 uv, bool bt2020 = false, bool softToe = false) {
+                     float2 uv, uint hdrMode = 0u) {
     float2 step = 1.0f / float2(luma.get_width(), luma.get_height());
     half y = (luma.sample(linearSampler, uv + float2(-step.x, -step.y)).r
             + luma.sample(linearSampler, uv + float2(step.x, -step.y)).r
             + luma.sample(linearSampler, uv + float2(-step.x, step.y)).r
             + luma.sample(linearSampler, uv + float2(step.x, step.y)).r) * half(0.25);
-    if (!bt2020) return nv12Color(y, chroma.sample(linearSampler, uv).rg);
+    if (hdrMode == 0u) return nv12Color(y, chroma.sample(linearSampler, uv).rg);
     half2 cbcr = fma(chroma.sample(linearSampler, uv).rg, half(255.0 / 224.0), half(-128.0 / 224.0));
-    return decodeLowYCbCr(nv12Luma(y), cbcr, true, softToe);
+    return decodeLowYCbCr(nv12Luma(y), cbcr, hdrMode);
 }
 // Local 3x3 envelope breakout with low-contrast background gating: VT blur on static fine text stays
 // inside or adjacent to high-contrast 3x3 extrema (rangeY/rangeC large -> 0 release), while a fast-moving
@@ -215,14 +223,13 @@ kernel void selectMotion(texture2d<half, access::sample> lowA [[texture(0)]],
     float2 lowStep = 1.0f / lowSize;
     float2 uv = (float2(gid) + 0.5f) / float2(w, h);
     uint motionFlags = uint(motionScale.w + 0.5f);
-    bool bt2020 = (motionFlags & 3u) >= 1u;
-    bool softToe = (motionFlags & 3u) >= 2u;
+    uint hdrMode = motionFlags & 3u;
     bool hudDehalo = (motionFlags & 8u) != 0u;
     bool safeFinite = (motionFlags & 16u) != 0u;
     bool lowStatic = false;
     if (weights.y > 0.5f) {
-        half3 la = lowBlur(lowA, lowAChroma, uv, bt2020, softToe);
-        half3 lb = lowBlur(lowB, lowBChroma, uv, bt2020, softToe);
+        half3 la = lowBlur(lowA, lowAChroma, uv, hdrMode);
+        half3 lb = lowBlur(lowB, lowBChroma, uv, hdrMode);
         lowStatic = length(la - lb) < half(0.012);
     }
     half2 centerRaw = motion.sample(nearestSampler, uv).rg;
@@ -442,8 +449,7 @@ kernel void merge(texture2d<half, access::sample> a [[texture(0)]],
     if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
     float2 uv = (float2(gid) + 0.5f) / float2(output.get_width(), output.get_height());
     uint qualityFlags = uint(weights.w + 0.5f);
-    bool bt2020 = (qualityFlags & 3u) >= 1u;
-    bool softToe = (qualityFlags & 3u) >= 2u;
+    uint hdrMode = qualityFlags & 3u;
     bool iconEnvelope = (qualityFlags & 16u) != 0u;
     bool adaptiveCAS = (qualityFlags & 32u) != 0u;
     half4 md = half4(0.0);
@@ -453,7 +459,7 @@ kernel void merge(texture2d<half, access::sample> a [[texture(0)]],
         lowStatic = md.z >= half(1.5);
         if (lowStatic) md.z -= half(2.0);
     } else if (weights.y > 0.5f) {
-        half3 la = lowBlur(lowA, lowAChroma, uv, bt2020, softToe), lb = lowBlur(lowB, lowBChroma, uv, bt2020, softToe);
+        half3 la = lowBlur(lowA, lowAChroma, uv, hdrMode), lb = lowBlur(lowB, lowBChroma, uv, hdrMode);
         lowStatic = length(la - lb) < half(0.012);
     }
     half staticW = half(0.0);
@@ -576,8 +582,8 @@ kernel void mergeNV12Out(texture2d<half, access::sample> a [[texture(0)]],
     float2 invFull = 1.0f / float2(outY.get_width(), outY.get_height());
     float2 uvCenter = (float2(base) + 1.0f) * invFull;
     uint qualityFlags = uint(weights.w + 0.5f);
-    bool bt2020 = (qualityFlags & 3u) >= 1u;
-    bool softToe = (qualityFlags & 3u) >= 2u;
+    uint hdrMode = qualityFlags & 3u;
+    bool bt2020 = hdrMode >= 1u;
     half4 md = half4(0.0);
     bool lowStatic = false;
     if (hasMotion) {
@@ -585,8 +591,8 @@ kernel void mergeNV12Out(texture2d<half, access::sample> a [[texture(0)]],
         lowStatic = md.z >= half(1.5);
         if (lowStatic) md.z -= half(2.0);
     } else if (weights.y > 0.5f) {
-        half3 la = lowBlur(lowA, lowAChroma, uvCenter, bt2020, softToe);
-        half3 lb = lowBlur(lowB, lowBChroma, uvCenter, bt2020, softToe);
+        half3 la = lowBlur(lowA, lowAChroma, uvCenter, hdrMode);
+        half3 lb = lowBlur(lowB, lowBChroma, uvCenter, hdrMode);
         lowStatic = length(la - lb) < half(0.012);
     }
     half tHalf = half(weights.x);
