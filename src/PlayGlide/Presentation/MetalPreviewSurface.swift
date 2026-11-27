@@ -125,6 +125,11 @@ final class PreviewImageRenderer {
         else { return 0 }
         return min(1, value)
     }
+    /// Luma-guided 2×2 joint-bilateral 4:2:0 → 4:4:4 chroma upsampling to suppress color bleeding on
+    /// saturated UI/text edges (`PLAYGLIDE_BILATERAL_CHROMA=1`).
+    static var bilateralChromaEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_BILATERAL_CHROMA"] == "1"
+    }
 
     private let device: any MTLDevice
     private let context: CIContext
@@ -168,6 +173,7 @@ final class PreviewImageRenderer {
     var hudDehaloOverride: Bool?
     var adaptiveCASOverride: Bool?
     var globalRCASOverride: Float?
+    var bilateralChromaOverride: Bool?
     /// The frame whose MetalFX output is still in the upscaler's output texture.
     private var spatialKey: Key?
     private var reusedSpatialOutput = false
@@ -669,10 +675,12 @@ final class PreviewImageRenderer {
             ditherScale = 0
         }
         let rcasStrength = suppressPostProcess ? 0 : min(1, max(0, globalRCASOverride ?? Self.globalRCASStrength))
+        let bilateralChroma = bilateralChromaOverride ?? Self.bilateralChromaEnabled
+        let postFlags: Float = Float(bilateralChroma ? 1 : 0)
         var uniforms = PreviewUniforms(
             primary: primaryUniforms, original: originalUniforms,
             split: SIMD4<Float>(compare ? 1 : 0, floor(Float(destination.width) * 0.5), ditherScale, 0),
-            post: SIMD4<Float>(rcasStrength, 0, 0, 0))
+            post: SIMD4<Float>(rcasStrength, postFlags, 0, 0))
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(primary.primary, index: 0)
         encoder.setFragmentTexture(primary.chroma ?? primary.primary, index: 1)
@@ -917,6 +925,8 @@ final class PreviewImageRenderer {
         let hudDehalo = hudDehaloOverride ?? HybridInterpolator.hudDehaloEnabled
         let adaptiveCAS = adaptiveCASOverride ?? HybridInterpolator.adaptiveCASEnabled
         let rcasStrength = suppressPostProcess ? 0 : min(1, max(0, globalRCASOverride ?? Self.globalRCASStrength))
+        let bilateralChroma = bilateralChromaOverride ?? Self.bilateralChromaEnabled
+        let postFlags: Float = Float(bilateralChroma ? 1 : 0)
         let qualityFlags =
             (Self.hybridEdgeRefineEnabled ? 1 : 0) | (hudDehalo ? 4 : 0)
             | (stabilizesSpatialDetail ? 8 : 0) | (iconEnvelope ? 16 : 0) | (adaptiveCAS ? 32 : 0)
@@ -929,7 +939,7 @@ final class PreviewImageRenderer {
             weights: SIMD4<Float>(
                 recipe.phase, recipe.restoresStaticPixels ? 1 : 0, recipe.sharpenStrength,
                 Float(qualityFlags)),
-            post: SIMD4<Float>(rcasStrength, 0, 0, 0))
+            post: SIMD4<Float>(rcasStrength, postFlags, 0, 0))
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(srcA.primary, index: 0)
         encoder.setFragmentTexture(aChroma, index: 1)
@@ -1218,11 +1228,53 @@ final class PreviewImageRenderer {
                 fma(half(-0.468124), cbcr.y, fma(half(-0.187324), cbcr.x, y)),
                 fma(half(1.8556), cbcr.x, y)));
         }
+        inline half2 sampleBilateralChroma(
+            texture2d<half, access::sample> lumaTex,
+            texture2d<half, access::sample> chromaTex,
+            float2 uv, float2 chromaOffset, half centerRawY
+        ) {
+            float2 cSize = float2(chromaTex.get_width(), chromaTex.get_height());
+            float2 invCSize = 1.0f / cSize;
+            float2 cPos = (uv + chromaOffset) * cSize - 0.5f;
+            float2 cBase = floor(cPos);
+            float2 f = saturate(cPos - cBase);
+            float2 c00 = (cBase + 0.5f) * invCSize;
+            float2 c10 = c00 + float2(invCSize.x, 0.0f);
+            float2 c01 = c00 + float2(0.0f, invCSize.y);
+            float2 c11 = c00 + invCSize;
+
+            half sw00 = half((1.0f - f.x) * (1.0f - f.y));
+            half sw10 = half(f.x * (1.0f - f.y));
+            half sw01 = half((1.0f - f.x) * f.y);
+            half sw11 = half(f.x * f.y);
+
+            half y00 = lumaTex.sample(previewSampler, c00 - chromaOffset).r;
+            half y10 = lumaTex.sample(previewSampler, c10 - chromaOffset).r;
+            half y01 = lumaTex.sample(previewSampler, c01 - chromaOffset).r;
+            half y11 = lumaTex.sample(previewSampler, c11 - chromaOffset).r;
+
+            half d00 = centerRawY - y00;
+            half d10 = centerRawY - y10;
+            half d01 = centerRawY - y01;
+            half d11 = centerRawY - y11;
+            half w00 = sw00 / fma(d00 * d00, half(1200.0), half(1.0));
+            half w10 = sw10 / fma(d10 * d10, half(1200.0), half(1.0));
+            half w01 = sw01 / fma(d01 * d01, half(1200.0), half(1.0));
+            half w11 = sw11 / fma(d11 * d11, half(1200.0), half(1.0));
+            half wSum = w00 + w10 + w01 + w11;
+
+            half2 uv00 = chromaTex.sample(previewNearestSampler, c00).rg;
+            half2 uv10 = chromaTex.sample(previewNearestSampler, c10).rg;
+            half2 uv01 = chromaTex.sample(previewNearestSampler, c01).rg;
+            half2 uv11 = chromaTex.sample(previewNearestSampler, c11).rg;
+            return (uv00 * w00 + uv10 * w10 + uv01 * w01 + uv11 * w11) / max(wSum, half(1e-4));
+        }
         inline half3 sampleSource(
             texture2d<half, access::sample> primaryTex,
             texture2d<half, access::sample> chromaTex,
             SourceUniforms src,
-            float2 px
+            float2 px,
+            bool bilateralChroma = false
         ) {
             if (px.x < src.fitRect.x || px.x >= src.fitMax.x || px.y < src.fitRect.y || px.y >= src.fitMax.y) {
                 return half3(0.0h);
@@ -1257,10 +1309,13 @@ final class PreviewImageRenderer {
                          + primaryTex.sample(previewSampler, uv3).rgb) * half(0.25);
                 }
             } else if (src.flags.x > 0.5f) {
-                half y = fma(primaryTex.sample(previewSampler, uv).r, half(255.0 / 219.0), half(-16.0 / 219.0));
+                half rawY = primaryTex.sample(previewSampler, uv).r;
+                half y = fma(rawY, half(255.0 / 219.0), half(-16.0 / 219.0));
                 // flags.zw moves from chroma texel centers to the surface's 4:2:0 sample positions.
-                half2 cbcr = fma(
-                    chromaTex.sample(previewSampler, uv + src.flags.zw).rg, half(255.0 / 224.0), half(-128.0 / 224.0));
+                half2 chroma = bilateralChroma
+                    ? sampleBilateralChroma(primaryTex, chromaTex, uv, src.flags.zw, rawY)
+                    : chromaTex.sample(previewSampler, uv + src.flags.zw).rg;
+                half2 cbcr = fma(chroma, half(255.0 / 224.0), half(-128.0 / 224.0));
                 rgb = decodeYCbCr(y, cbcr, bt2020, softToe);
             } else {
                 rgb = primaryTex.sample(previewSampler, uv).rgb;
@@ -1312,26 +1367,28 @@ final class PreviewImageRenderer {
             constant PreviewUniforms &uniforms [[buffer(0)]]
         ) {
             float2 px = in.position.xy;
+            uint postFlags = uint(uniforms.post.y + 0.5f);
+            bool bilateralChroma = (postFlags & 1u) != 0u;
             bool useOriginal = uniforms.split.x > 0.5f && px.x < uniforms.split.y;
             SourceUniforms activeSrc = useOriginal ? uniforms.original : uniforms.primary;
             half3 rgb = useOriginal
-                ? sampleSource(originalTex, originalChroma, activeSrc, px)
-                : sampleSource(primaryTex, primaryChroma, activeSrc, px);
+                ? sampleSource(originalTex, originalChroma, activeSrc, px, bilateralChroma)
+                : sampleSource(primaryTex, primaryChroma, activeSrc, px, bilateralChroma);
             if (uniforms.post.x > 0.001f
                 && px.x >= activeSrc.fitRect.x && px.x < activeSrc.fitMax.x
                 && px.y >= activeSrc.fitRect.y && px.y < activeSrc.fitMax.y) {
                 half3 n = useOriginal
-                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(0.0f, -1.0f))
-                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(0.0f, -1.0f));
+                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(0.0f, -1.0f), bilateralChroma)
+                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(0.0f, -1.0f), bilateralChroma);
                 half3 s = useOriginal
-                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(0.0f, 1.0f))
-                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(0.0f, 1.0f));
+                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(0.0f, 1.0f), bilateralChroma)
+                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(0.0f, 1.0f), bilateralChroma);
                 half3 e = useOriginal
-                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(1.0f, 0.0f))
-                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(1.0f, 0.0f));
+                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(1.0f, 0.0f), bilateralChroma)
+                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(1.0f, 0.0f), bilateralChroma);
                 half3 w = useOriginal
-                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(-1.0f, 0.0f))
-                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(-1.0f, 0.0f));
+                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(-1.0f, 0.0f), bilateralChroma)
+                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(-1.0f, 0.0f), bilateralChroma);
                 bool bt2020 = activeSrc.flags.x > 1.5f;
                 rgb = previewApplyRCAS(rgb, n, s, e, w, half(uniforms.post.x), bt2020);
             }
@@ -1355,7 +1412,7 @@ final class PreviewImageRenderer {
         inline void sampleStaticPlane(
             texture2d<half, access::sample> lumaTex,
             texture2d<half, access::sample> chromaTex,
-            float2 uv, float2 chromaOffset, SourceUniforms src, bool windowAA,
+            float2 uv, float2 chromaOffset, SourceUniforms src, bool windowAA, bool bilateralChroma,
             thread half &outY, thread half2 &outUV
         ) {
             if (windowAA) {
@@ -1374,7 +1431,9 @@ final class PreviewImageRenderer {
                        + chromaTex.sample(previewSampler, uv3 + chromaOffset).rg) * half(0.25);
             } else {
                 outY = lumaTex.sample(previewSampler, uv).r;
-                outUV = chromaTex.sample(previewSampler, uv + chromaOffset).rg;
+                outUV = bilateralChroma
+                    ? sampleBilateralChroma(lumaTex, chromaTex, uv, chromaOffset, outY)
+                    : chromaTex.sample(previewSampler, uv + chromaOffset).rg;
             }
         }
         inline half3 previewLowBlur(
@@ -1737,13 +1796,15 @@ final class PreviewImageRenderer {
             if (px.x < src.fitRect.x || px.x >= src.fitMax.x || px.y < src.fitRect.y || px.y >= src.fitMax.y) {
                 return half4(half3(0.0h), half(1.0));
             }
+            uint postFlags = uint(u.post.y + 0.5f);
+            bool bilateralChroma = (postFlags & 1u) != 0u;
             if (u.split.x > 0.5f && px.x < u.split.y) {
-                half3 orig = sampleSource(aTex, aChroma, src, px);
+                half3 orig = sampleSource(aTex, aChroma, src, px, bilateralChroma);
                 if (u.post.x > 0.001f) {
-                    half3 n = sampleSource(aTex, aChroma, src, px + float2(0.0f, -1.0f));
-                    half3 s = sampleSource(aTex, aChroma, src, px + float2(0.0f, 1.0f));
-                    half3 e = sampleSource(aTex, aChroma, src, px + float2(1.0f, 0.0f));
-                    half3 w = sampleSource(aTex, aChroma, src, px + float2(-1.0f, 0.0f));
+                    half3 n = sampleSource(aTex, aChroma, src, px + float2(0.0f, -1.0f), bilateralChroma);
+                    half3 s = sampleSource(aTex, aChroma, src, px + float2(0.0f, 1.0f), bilateralChroma);
+                    half3 e = sampleSource(aTex, aChroma, src, px + float2(1.0f, 0.0f), bilateralChroma);
+                    half3 w = sampleSource(aTex, aChroma, src, px + float2(-1.0f, 0.0f), bilateralChroma);
                     orig = previewApplyRCAS(orig, n, s, e, w, half(u.post.x), src.flags.x > 1.5f);
                 }
                 if (u.split.z > 0.0f) {
@@ -1786,8 +1847,8 @@ final class PreviewImageRenderer {
             half yA = half(0.0), yB = half(0.0);
             half2 caUV = half2(0.0), cbUV = half2(0.0);
             if (lowStatic) {
-                sampleStaticPlane(aTex, aChroma, uv, u.offsets.xy, src, windowAA, yA, caUV);
-                sampleStaticPlane(bTex, bChroma, uv, u.offsets.zw, src, windowAA, yB, cbUV);
+                sampleStaticPlane(aTex, aChroma, uv, u.offsets.xy, src, windowAA, bilateralChroma, yA, caUV);
+                sampleStaticPlane(bTex, bChroma, uv, u.offsets.zw, src, windowAA, bilateralChroma, yB, cbUV);
                 half dY = (yA - yB) * half(255.0 / 219.0);
                 half2 dCbCr = (caUV - cbUV) * half(255.0 / 224.0);
                 half dR, dG, dB;
@@ -1847,7 +1908,10 @@ final class PreviewImageRenderer {
             } else {
                 midY = saturate(previewNv12Luma(half(previewCatmullRom(lowMidTex, uv, edgeRefine).r)));
             }
-            half2 midUV = lowMidChroma.sample(previewSampler, uv).rg;
+            half midRawY = clamp(fma(midY, half(219.0 / 255.0), half(16.0 / 255.0)), half(16.0 / 255.0), half(235.0 / 255.0));
+            half2 midUV = bilateralChroma
+                ? sampleBilateralChroma(lowMidTex, lowMidChroma, uv, float2(0.0f), midRawY)
+                : lowMidChroma.sample(previewSampler, uv).rg;
             half y = midY;
             half alignedY = midY;
             half alignedWeight = half(0.0);
@@ -1961,8 +2025,8 @@ final class PreviewImageRenderer {
                     half midDev = max(half(0.0), max(min(lowAY, lowBY) - midY, midY - max(lowAY, lowBY)));
                     half stYA = half(0.0), stYB = half(0.0);
                     half2 stCA = half2(0.0), stCB = half2(0.0);
-                    sampleStaticPlane(aTex, aChroma, uv, u.offsets.xy, src, windowAA, stYA, stCA);
-                    sampleStaticPlane(bTex, bChroma, uv, u.offsets.zw, src, windowAA, stYB, stCB);
+                    sampleStaticPlane(aTex, aChroma, uv, u.offsets.xy, src, windowAA, bilateralChroma, stYA, stCA);
+                    sampleStaticPlane(bTex, bChroma, uv, u.offsets.zw, src, windowAA, bilateralChroma, stYB, stCB);
                     half dSC = length((stCA - stCB) * half(255.0 / 224.0));
                     half strokeW = (half(1.0) - smoothstep(half(0.005), half(0.012), dSY))
                         * (half(1.0) - smoothstep(half(0.012), half(0.024), dSC))
