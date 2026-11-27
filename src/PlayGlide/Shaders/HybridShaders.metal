@@ -62,6 +62,67 @@ inline half3 lowBlur(texture2d<half, access::sample> luma, texture2d<half, acces
     half2 cbcr = fma(chroma.sample(linearSampler, uv).rg, half(255.0 / 224.0), half(-128.0 / 224.0));
     return decodeLowYCbCr(nv12Luma(y), cbcr, true, softToe);
 }
+// Local 3x3 envelope breakout with low-contrast background gating: VT blur on static fine text stays
+// inside or adjacent to high-contrast 3x3 extrema (rangeY/rangeC large -> 0 release), while a fast-moving
+// icon gliding across a smooth static background breaks out of the local [min3x3, max3x3] envelope.
+inline half iconEnvelopeRelease(
+    texture2d<half, access::sample> lowA, texture2d<half, access::sample> lowAChroma,
+    texture2d<half, access::sample> lowB, texture2d<half, access::sample> lowBChroma,
+    texture2d<half, access::sample> lowMid, texture2d<half, access::sample> lowMidChroma,
+    float2 uv
+) {
+    float2 lStep = 1.0f / float2(lowA.get_width(), lowA.get_height());
+    half minY = half(1.0);
+    half maxY = half(0.0);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            float2 p = uv + float2(float(dx), float(dy)) * lStep;
+            half ya = saturate(nv12Luma(lowA.sample(linearSampler, p).r));
+            half yb = saturate(nv12Luma(lowB.sample(linearSampler, p).r));
+            minY = min(minY, min(ya, yb));
+            maxY = max(maxY, max(ya, yb));
+        }
+    }
+    // Include +/-2 cardinal neighbors to cover VT's 2-texel blur footprint around static fine text.
+    const float2 haloOffsets[4] = {
+        float2(-2.0f, 0.0f), float2(2.0f, 0.0f), float2(0.0f, -2.0f), float2(0.0f, 2.0f)
+    };
+    for (int i = 0; i < 4; ++i) {
+        float2 p = uv + haloOffsets[i] * lStep;
+        half ya = saturate(nv12Luma(lowA.sample(linearSampler, p).r));
+        half yb = saturate(nv12Luma(lowB.sample(linearSampler, p).r));
+        minY = min(minY, min(ya, yb));
+        maxY = max(maxY, max(ya, yb));
+    }
+    half rangeY = maxY - minY;
+    if (rangeY >= half(0.08)) return half(0.0);
+    float2 cStep = 1.0f / float2(lowAChroma.get_width(), lowAChroma.get_height());
+    half2 minC = half2(1.0);
+    half2 maxC = half2(0.0);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            float2 p = uv + float2(float(dx), float(dy)) * cStep;
+            half2 ca = lowAChroma.sample(linearSampler, p).rg;
+            half2 cb = lowBChroma.sample(linearSampler, p).rg;
+            minC = min(minC, min(ca, cb));
+            maxC = max(maxC, max(ca, cb));
+        }
+    }
+    half2 rangeC = (maxC - minC) * half(255.0 / 224.0);
+    half maxRangeC = max(rangeC.x, rangeC.y);
+    if (maxRangeC >= half(0.07)) return half(0.0);
+    half midY = saturate(nv12Luma(lowMid.sample(linearSampler, uv).r));
+    half2 midC = lowMidChroma.sample(linearSampler, uv).rg;
+    half lumaBreak = max(half(0.0), max(minY - midY, midY - maxY));
+    half2 chromaOver = max(half2(0.0), max(minC - midC, midC - maxC)) * half(255.0 / 224.0);
+    half chromaBreak = length(chromaOver);
+    half bgSmooth = (half(1.0) - smoothstep(half(0.03), half(0.08), rangeY))
+        * (half(1.0) - smoothstep(half(0.03), half(0.07), maxRangeC));
+    half breakout = max(
+        smoothstep(half(0.065), half(0.14), lumaBreak),
+        smoothstep(half(0.055), half(0.12), chromaBreak));
+    return bgSmooth * breakout;
+}
 // Four bilinear taps per output texel; covers both the 0.5 (4K) and 0.75 (1440p) scales.
 kernel void shrinkLuma(texture2d<half, access::sample> source [[texture(0)]],
                        texture2d<half, access::write> output [[texture(1)]],
@@ -360,6 +421,7 @@ kernel void merge(texture2d<half, access::sample> a [[texture(0)]],
     uint qualityFlags = uint(weights.w + 0.5f);
     bool bt2020 = (qualityFlags & 3u) >= 1u;
     bool softToe = (qualityFlags & 3u) >= 2u;
+    bool iconEnvelope = (qualityFlags & 16u) != 0u;
     half4 md = half4(0.0);
     bool lowStatic = false;
     if (hasMotion) {
@@ -370,11 +432,20 @@ kernel void merge(texture2d<half, access::sample> a [[texture(0)]],
         half3 la = lowBlur(lowA, lowAChroma, uv, bt2020, softToe), lb = lowBlur(lowB, lowBChroma, uv, bt2020, softToe);
         lowStatic = length(la - lb) < half(0.012);
     }
+    half staticW = half(0.0);
+    half3 staticColor = half3(0.0);
     if (lowStatic) {
         half3 ca = sourceColor(a, aChroma, uv, offsets.xy), cb = sourceColor(b, bChroma, uv, offsets.zw);
         if (length(ca - cb) < half(0.014)) {
-            output.write(half4(mix(ca, cb, half(weights.x)), half(1.0)), gid);
-            return;
+            half release = iconEnvelope
+                ? iconEnvelopeRelease(lowA, lowAChroma, lowB, lowBChroma, lowMid, lowMidChroma, uv)
+                : half(0.0);
+            staticW = half(1.0) - release;
+            staticColor = mix(ca, cb, half(weights.x));
+            if (staticW >= half(0.999)) {
+                output.write(half4(staticColor, half(1.0)), gid);
+                return;
+            }
         }
     }
     half midRawY = half(catmullRom(lowMid, uv).r);
@@ -425,6 +496,9 @@ kernel void merge(texture2d<half, access::sample> a [[texture(0)]],
         half k = -half(weights.z) * sqrt(amp);
         half sharpY = clamp((y + k * (n + so + e + w)) / (half(1.0) + half(4.0) * k), mn, mx);
         color = saturate(color + half3(sharpY - y));
+    }
+    if (staticW > half(0.001)) {
+        color = mix(color, staticColor, staticW);
     }
     output.write(half4(color, half(1.0)), gid);
 }
@@ -490,6 +564,10 @@ kernel void mergeNV12Out(texture2d<half, access::sample> a [[texture(0)]],
     }
     half tHalf = half(weights.x);
     bool hudDehalo = (qualityFlags & 4u) != 0u;
+    bool iconEnvelope = (qualityFlags & 16u) != 0u;
+    half iconRelease = (iconEnvelope && lowStatic)
+        ? iconEnvelopeRelease(lowA, lowAChroma, lowB, lowBChroma, lowMid, lowMidChroma, uvCenter)
+        : half(0.0);
     half pairedConfidence = (qualityFlags & 8u) != 0u && hasMotion
         ? smoothstep(half(0.25), half(0.80), min(md.z, md.w)) : half(0.0);
     half2 caUV = half2(0.0), cbUV = half2(0.0);
@@ -520,7 +598,7 @@ kernel void mergeNV12Out(texture2d<half, access::sample> a [[texture(0)]],
             half bl = dY + dB;
             diff2[k] = r * r + g * g + bl * bl;
         }
-        if (pairedConfidence == half(0.0)
+        if (pairedConfidence == half(0.0) && iconRelease < half(0.001)
             && max(max(diff2[0], diff2[1]), max(diff2[2], diff2[3])) < half(0.014 * 0.014)) {
             outY.write(half4(mix(yA[0], yB[0], tHalf)), base);
             outY.write(half4(mix(yA[1], yB[1], tHalf)), base + uint2(1, 0));
@@ -604,7 +682,9 @@ kernel void mergeNV12Out(texture2d<half, access::sample> a [[texture(0)]],
         for (uint dx = 0; dx < 2; ++dx) {
             uint k = dy * 2 + dx;
             uint2 px = base + uint2(dx, dy);
-            half staticW = lowStatic ? smoothstep(half(0.022), half(0.011), sqrt(diff2[k])) : half(0.0);
+            half staticW = lowStatic
+                ? smoothstep(half(0.022), half(0.011), sqrt(diff2[k])) * (half(1.0) - iconRelease)
+                : half(0.0);
             if (staticW >= half(0.999) && pairedConfidence == half(0.0)) {
                 staticWeightSum += staticW;
                 outY.write(half4(mix(yA[k], yB[k], tHalf)), px);

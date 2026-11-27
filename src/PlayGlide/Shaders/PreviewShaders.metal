@@ -230,6 +230,66 @@ inline half3 previewLowBlur(
     half2 cbcr = fma(chroma.sample(previewSampler, uv).rg, half(255.0 / 224.0), half(-128.0 / 224.0));
     return decodeYCbCr(previewNv12Luma(y), cbcr, bt2020, softToe);
 }
+// Local 3x3 envelope breakout with low-contrast background gating: keeps static fine text at staticW == 1.0
+// while preserving fast-moving midpoint icons gliding over smooth static backgrounds.
+inline half previewIconEnvelopeRelease(
+    texture2d<half, access::sample> lowA, texture2d<half, access::sample> lowAChroma,
+    texture2d<half, access::sample> lowB, texture2d<half, access::sample> lowBChroma,
+    texture2d<half, access::sample> lowMid, texture2d<half, access::sample> lowMidChroma,
+    float2 uv
+) {
+    float2 lStep = 1.0f / float2(lowA.get_width(), lowA.get_height());
+    half minY = half(1.0);
+    half maxY = half(0.0);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            float2 p = uv + float2(float(dx), float(dy)) * lStep;
+            half ya = saturate(previewNv12Luma(lowA.sample(previewSampler, p).r));
+            half yb = saturate(previewNv12Luma(lowB.sample(previewSampler, p).r));
+            minY = min(minY, min(ya, yb));
+            maxY = max(maxY, max(ya, yb));
+        }
+    }
+    // Include +/-2 cardinal neighbors to cover VT's 2-texel blur footprint around static fine text.
+    const float2 haloOffsets[4] = {
+        float2(-2.0f, 0.0f), float2(2.0f, 0.0f), float2(0.0f, -2.0f), float2(0.0f, 2.0f)
+    };
+    for (int i = 0; i < 4; ++i) {
+        float2 p = uv + haloOffsets[i] * lStep;
+        half ya = saturate(previewNv12Luma(lowA.sample(previewSampler, p).r));
+        half yb = saturate(previewNv12Luma(lowB.sample(previewSampler, p).r));
+        minY = min(minY, min(ya, yb));
+        maxY = max(maxY, max(ya, yb));
+    }
+    half rangeY = maxY - minY;
+    if (rangeY >= half(0.08)) return half(0.0);
+    float2 cStep = 1.0f / float2(lowAChroma.get_width(), lowAChroma.get_height());
+    half2 minC = half2(1.0);
+    half2 maxC = half2(0.0);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            float2 p = uv + float2(float(dx), float(dy)) * cStep;
+            half2 ca = lowAChroma.sample(previewSampler, p).rg;
+            half2 cb = lowBChroma.sample(previewSampler, p).rg;
+            minC = min(minC, min(ca, cb));
+            maxC = max(maxC, max(ca, cb));
+        }
+    }
+    half2 rangeC = (maxC - minC) * half(255.0 / 224.0);
+    half maxRangeC = max(rangeC.x, rangeC.y);
+    if (maxRangeC >= half(0.07)) return half(0.0);
+    half midY = saturate(previewNv12Luma(lowMid.sample(previewSampler, uv).r));
+    half2 midC = lowMidChroma.sample(previewSampler, uv).rg;
+    half lumaBreak = max(half(0.0), max(minY - midY, midY - maxY));
+    half2 chromaOver = max(half2(0.0), max(minC - midC, midC - maxC)) * half(255.0 / 224.0);
+    half chromaBreak = length(chromaOver);
+    half bgSmooth = (half(1.0) - smoothstep(half(0.03), half(0.08), rangeY))
+        * (half(1.0) - smoothstep(half(0.03), half(0.07), maxRangeC));
+    half breakout = max(
+        smoothstep(half(0.065), half(0.14), lumaBreak),
+        smoothstep(half(0.055), half(0.12), chromaBreak));
+    return bgSmooth * breakout;
+}
 inline float4 previewCatmullRom(texture2d<half, access::sample> image, float2 uv, bool antiRing) {
     float2 size = float2(image.get_width(), image.get_height());
     float2 position = uv * size;
@@ -524,6 +584,7 @@ fragment half4 previewHybridFragment(
     bool edgeRefine = (qualityFlags & 1u) != 0u;
     bool hudDehalo = (qualityFlags & 4u) != 0u;
     bool spatialMovingDetail = (qualityFlags & 8u) != 0u && previewHasMotion;
+    bool iconEnvelope = (qualityFlags & 16u) != 0u;
     half pairedConfidence = spatialMovingDetail
         ? smoothstep(half(0.05), half(0.45), min(md.z, md.w)) : half(0.0);
     bool windowAA = u.split.w > 0.5f && src.fitMax.z > 0.0f;
@@ -548,6 +609,10 @@ fragment half4 previewHybridFragment(
             dB = dY + half(1.8556) * dCbCr.x;
         }
         staticW = smoothstep(half(0.022), half(0.011), sqrt(dR * dR + dG * dG + dB * dB));
+        if (iconEnvelope && staticW > half(0.001)) {
+            staticW *= half(1.0) - previewIconEnvelopeRelease(
+                lowATex, lowAChroma, lowBTex, lowBChroma, lowMidTex, lowMidChroma, uv);
+        }
         if (staticW >= half(0.999) && pairedConfidence == half(0.0)) {
             half yStatic = previewNv12Luma(mix(yA, yB, tHalf));
             half2 cbcrStatic = fma(mix(caUV, cbUV, tHalf), half(255.0 / 224.0), half(-128.0 / 224.0));
