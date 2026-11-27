@@ -152,6 +152,7 @@ final class PreviewImageRenderer {
     var spatialDeferredComposeOverride: Bool?
     var spatialMovingDetailOverride: Bool?
     var iconEnvelopeOverride: Bool?
+    var hudDehaloOverride: Bool?
     /// The frame whose MetalFX output is still in the upscaler's output texture.
     private var spatialKey: Key?
     private var reusedSpatialOutput = false
@@ -834,8 +835,9 @@ final class PreviewImageRenderer {
                     let select = command.makeComputeCommandEncoder()
                 {
                     let hdrBits = recipe.isHDR10PQ ? (Self.hdr10SoftBlackToeEnabled ? 2 : 1) : 0
+                    let hudDehalo = hudDehaloOverride ?? HybridInterpolator.hudDehaloEnabled
                     let motionFlags =
-                        hdrBits | (HybridInterpolator.hudDehaloEnabled ? 8 : 0)
+                        hdrBits | (hudDehalo ? 8 : 0)
                         | (HybridInterpolator.shaderSafeFiniteEnabled ? 16 : 0)
                     var weights = SIMD4<Float>(
                         recipe.phase, recipe.restoresStaticPixels ? 1 : 0, recipe.sharpenStrength,
@@ -893,8 +895,9 @@ final class PreviewImageRenderer {
         let stabilizesSpatialDetail =
             (spatialMovingDetailOverride ?? HybridInterpolator.spatialMovingDetailEnabled) && frame.spatial
         let iconEnvelope = iconEnvelopeOverride ?? HybridInterpolator.iconEnvelopeEnabled
+        let hudDehalo = hudDehaloOverride ?? HybridInterpolator.hudDehaloEnabled
         let qualityFlags =
-            (Self.hybridEdgeRefineEnabled ? 1 : 0) | (HybridInterpolator.hudDehaloEnabled ? 4 : 0)
+            (Self.hybridEdgeRefineEnabled ? 1 : 0) | (hudDehalo ? 4 : 0)
             | (stabilizesSpatialDetail ? 8 : 0) | (iconEnvelope ? 16 : 0)
         var uniforms = HybridPreviewUniforms(
             primary: primaryUniforms,
@@ -1552,6 +1555,29 @@ final class PreviewImageRenderer {
                 }
             }
             if (hudDehalo && centerSmall && !lowStatic && bestScore >= half(0.015)) {
+                // Gate far-distance (+/-2..3 macroblock) background probes on local spatial contrast plus a nearby
+                // static stroke anchor so dark or subtly moving MV=0 backgrounds never pay 80 extra texture fetches.
+                const float2 gateOffsets[9] = {
+                    float2(0.0f, 0.0f),
+                    float2(0.25f, 0.0f), float2(-0.25f, 0.0f), float2(0.0f, 0.25f), float2(0.0f, -0.25f),
+                    float2(0.50f, 0.0f), float2(-0.50f, 0.0f), float2(0.0f, 0.50f), float2(0.0f, -0.50f)
+                };
+                half minA = half(1.0), maxA = half(0.0);
+                half minB = half(1.0), maxB = half(0.0);
+                half minStaticDiff = half(1.0);
+                for (int g = 0; g < 9; ++g) {
+                    float2 gp = uv + gateOffsets[g] * gridStep;
+                    half ga = lowA.sample(previewSampler, gp).r;
+                    half gb = lowB.sample(previewSampler, gp).r;
+                    minA = min(minA, ga);
+                    maxA = max(maxA, ga);
+                    minB = min(minB, gb);
+                    maxB = max(maxB, gb);
+                    minStaticDiff = min(minStaticDiff, abs(ga - gb));
+                }
+                half spatialContrast = max(maxA - minA, maxB - minB) * half(255.0 / 219.0);
+                bool nearHighContrastHUD = spatialContrast >= half(0.18)
+                    && (minStaticDiff * half(255.0 / 219.0)) < half(0.045);
                 // Static high-contrast HUD text locks its 16x16 macroblock (32x32 at 4K) to MV=0.
                 // Step 2-3 macroblocks past text rows to borrow background MV and allow unoccluded
                 // single-sided matches when the opposite endpoint lands on static HUD text.
@@ -1560,7 +1586,7 @@ final class PreviewImageRenderer {
                     float2(2.0f, 0.0f), float2(-2.0f, 0.0f), float2(3.0f, 0.0f), float2(-3.0f, 0.0f)
                 };
                 float2 hudLastV = float2(1e6f);
-                for (int k = 0; k < 8; ++k) {
+                for (int k = 0; nearHighContrastHUD && k < 8; ++k) {
                     half2 rawV = motion.sample(previewNearestSampler, uv + hudOffsets[k] * gridStep).rg;
                     float2 v = float2(rawV);
                     if (!previewIsFiniteMotion(rawV, v, safeFinite) || (abs(v.x) < 0.25f && abs(v.y) < 0.25f)) continue;

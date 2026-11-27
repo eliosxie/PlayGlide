@@ -190,8 +190,9 @@ final class HybridInterpolator {
     var usesCPUDownscale = ProcessInfo.processInfo.environment["PLAYGLIDE_HYBRID_CPU_SHRINK"] != "0"
     /// Single-barrier fused luma+chroma CPU shrink and async 540p forward downscale (`PLAYGLIDE_FUSED_CPU_SHRINK=1`).
     var usesFusedCPUShrink = HybridInterpolator.fusedCPUShrinkEnabled
-    /// Optional override for deterministic GPU tests without mutating process environment variables.
+    /// Optional overrides for deterministic GPU tests without mutating process environment variables.
     var iconEnvelopeOverride: Bool?
+    var hudDehaloOverride: Bool?
 
     /// The largest even size within VT low-latency's limits that keeps the input aspect ratio.
     /// Passing `maxHeight: 720` (or `PLAYGLIDE_HYBRID_LOW=720`) stays inside Apple Neural Engine
@@ -732,8 +733,9 @@ final class HybridInterpolator {
             select.setComputePipelineState(forwardMotionTexture != nil ? selectMotionBidir : selectMotion)
         }
         let hdrBits = isHDR10PQ ? (PreviewImageRenderer.hdr10SoftBlackToeEnabled ? 2 : 1) : 0
+        let hudDehalo = hudDehaloOverride ?? Self.hudDehaloEnabled
         let motionFlags =
-            hdrBits | (Self.hudDehaloEnabled ? 8 : 0) | (Self.shaderSafeFiniteEnabled ? 16 : 0)
+            hdrBits | (hudDehalo ? 8 : 0) | (Self.shaderSafeFiniteEnabled ? 16 : 0)
         var weights = SIMD4<Float>(
             phase, restoresStaticPixels ? 1 : 0, sharpenStrength ?? detailMode.sharpenStrength,
             Float(motionSize.width))
@@ -882,7 +884,7 @@ final class HybridInterpolator {
                 guard let command = queue.makeCommandBuffer() else {
                     throw PipelineError(AppText("无法编码混合插帧", "Could not encode hybrid interpolation."))
                 }
-                let hudDehalo = Self.hudDehaloEnabled
+                let hudDehalo = hudDehaloOverride ?? Self.hudDehaloEnabled
                 let iconEnvelope = iconEnvelopeOverride ?? Self.iconEnvelopeEnabled
                 let hdrBits = isHDR10 ? (PreviewImageRenderer.hdr10SoftBlackToeEnabled ? 2 : 1) : 0
                 let motionFlags = hdrBits | (hudDehalo ? 8 : 0) | (Self.shaderSafeFiniteEnabled ? 16 : 0)
@@ -1663,6 +1665,29 @@ final class HybridInterpolator {
                 }
             }
             if (hudDehalo && centerSmall && !lowStatic && bestScore >= half(0.015)) {
+                // Gate far-distance (+/-2..3 macroblock) background probes on local spatial contrast plus a nearby
+                // static stroke anchor so dark or subtly moving MV=0 backgrounds never pay 80 extra texture fetches.
+                const float2 gateOffsets[9] = {
+                    float2(0.0f, 0.0f),
+                    float2(0.25f, 0.0f), float2(-0.25f, 0.0f), float2(0.0f, 0.25f), float2(0.0f, -0.25f),
+                    float2(0.50f, 0.0f), float2(-0.50f, 0.0f), float2(0.0f, 0.50f), float2(0.0f, -0.50f)
+                };
+                half minA = half(1.0), maxA = half(0.0);
+                half minB = half(1.0), maxB = half(0.0);
+                half minStaticDiff = half(1.0);
+                for (int g = 0; g < 9; ++g) {
+                    float2 gp = uv + gateOffsets[g] * gridStep;
+                    half ga = lowA.sample(linearSampler, gp).r;
+                    half gb = lowB.sample(linearSampler, gp).r;
+                    minA = min(minA, ga);
+                    maxA = max(maxA, ga);
+                    minB = min(minB, gb);
+                    maxB = max(maxB, gb);
+                    minStaticDiff = min(minStaticDiff, abs(ga - gb));
+                }
+                half spatialContrast = max(maxA - minA, maxB - minB) * half(255.0 / 219.0);
+                bool nearHighContrastHUD = spatialContrast >= half(0.18)
+                    && (minStaticDiff * half(255.0 / 219.0)) < half(0.045);
                 // Static high-contrast HUD text locks its 16x16 macroblock (32x32 at 4K) to MV=0.
                 // Step 2-3 macroblocks past text rows to borrow background MV and allow unoccluded
                 // single-sided matches when the opposite endpoint lands on static HUD text.
@@ -1671,7 +1696,7 @@ final class HybridInterpolator {
                     float2(2.0f, 0.0f), float2(-2.0f, 0.0f), float2(3.0f, 0.0f), float2(-3.0f, 0.0f)
                 };
                 float2 hudLastV = float2(1e6f);
-                for (int k = 0; k < 8; ++k) {
+                for (int k = 0; nearHighContrastHUD && k < 8; ++k) {
                     half2 rawV = motion.sample(nearestSampler, uv + hudOffsets[k] * gridStep).rg;
                     float2 v = float2(rawV);
                     if (!isFiniteMotion(rawV, v, safeFinite) || (abs(v.x) < 0.25f && abs(v.y) < 0.25f)) continue;
