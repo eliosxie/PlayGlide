@@ -178,7 +178,9 @@ actor PipelineSession {
                             cadence = Self.makeCadence(for: next, adaptiveHarmonicRate: adaptiveHarmonicRate)
                             fastContentRun = 0
                             duplicateWork = 0
-                            mailbox.flush(generation, fromSequence: frame.sequence)
+                            mailbox.flush(
+                                generation, fromSequence: frame.sequence,
+                                preserveAudioAnchor: CaptureAudioMonitor.smoothSyncEnabled)
                         }
                         let wantsHold = PerformanceHold.applies(to: next)
                         if wantsHold && hold == nil {

@@ -21,6 +21,7 @@ struct AudioBufferQueue<Payload> {
         let payload: Payload
     }
     private(set) var entries: [Entry] = []
+    private(set) var lastGapSeconds: Double = 0
     private var sequence: Int64 = 0
     private var previousEnd: CMTime?
     let capacity: Int
@@ -32,15 +33,16 @@ struct AudioBufferQueue<Payload> {
     }
 
     /// A discontinuity invalidates already-scheduled audio as well as the local queue.
-    mutating func append(time: CMTime, duration: CMTime, payload: Payload)
-        -> (accepted: Bool, reset: Bool, dropped: Int)
-    {
+    mutating func append(
+        time: CMTime, duration: CMTime, payload: Payload, negativeJitterTolerance: Double = 0.000_001
+    ) -> (accepted: Bool, reset: Bool, dropped: Int) {
         guard time.isNumeric, duration.isNumeric, time.seconds >= 0,
             duration.seconds > 0, duration.seconds <= 0.1
         else { return (false, false, 1) }
         let end = CMTimeAdd(time, duration)
         let gap = previousEnd.map { CMTimeSubtract(time, $0).seconds } ?? 0
-        let reset = gap < -0.000_001 || gap > 0.25
+        lastGapSeconds = gap
+        let reset = gap < -max(0.000_001, negativeJitterTolerance) || gap > 0.25
         var dropped = 0
         if reset {
             dropped = entries.count
@@ -93,6 +95,9 @@ struct AudioSyncController: Sendable {
 
     mutating func update(
         anchor: AudioVideoAnchor?, playbackTime: CMTime, now: Double, offsetSeconds: Double = 0,
+        preventSpeedup: Bool = false,
+        slewEntryThreshold: Double = 0.015,
+        slewExitThreshold: Double = 0.004,
         canAlign: @autoclosure () -> Bool = true
     ) -> Action {
         guard let anchor, now.isFinite, anchor.time.isNumeric, anchor.hostTime.isFinite,
@@ -146,10 +151,11 @@ struct AudioSyncController: Sendable {
         }
         guard now - lastAdjustment >= 1.5 else { return .none }
         let corrected: Float
-        if abs(smoothed) <= 0.004 || (rate == 1 && abs(smoothed) <= 0.015) {
+        if abs(smoothed) <= slewExitThreshold || (rate == 1 && abs(smoothed) <= slewEntryThreshold) {
             corrected = 1
         } else {
-            corrected = Float(1 - min(0.005, max(-0.005, smoothed / 2)))
+            let rawCorrected = Float(1 - min(0.005, max(-0.005, smoothed / 2)))
+            corrected = preventSpeedup && rawCorrected > 1 ? 1 : rawCorrected
         }
         guard corrected == 1 ? rate != 1 : abs(corrected - rate) >= 0.001 else { return .none }
         rate = corrected

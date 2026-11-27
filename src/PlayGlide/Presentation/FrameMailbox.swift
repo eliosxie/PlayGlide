@@ -455,6 +455,7 @@ final class FrameMailbox: Sendable {
         var gpuBusySince: Double?
         var timelineCapacity = 8
         var timelineRevision: UInt64 = 0
+        var audioTimelineRevision: UInt64 = 0
         var audioAnchor: (value: AudioVideoAnchor, sequence: Int64)?
         var previousCapturePTS: CMTime?
         var minimumSourceSequence: Int64 = 0
@@ -473,9 +474,14 @@ final class FrameMailbox: Sendable {
             wait.semaphore.signal()
         }
 
-        mutating func invalidateTimeline(fromSequence: Int64) {
+        mutating func invalidateTimeline(fromSequence: Int64, preserveAudioAnchor: Bool = false) {
             timelineRevision += 1
-            audioAnchor = nil
+            if preserveAudioAnchor, let existing = audioAnchor {
+                audioAnchor = (existing.value, fromSequence)
+            } else {
+                audioTimelineRevision += 1
+                audioAnchor = nil
+            }
             minimumSourceSequence = fromSequence
             duplicateInputTime = 0
             latestContentSequence = nil
@@ -679,22 +685,24 @@ final class FrameMailbox: Sendable {
             if !duplicate { $0.latestContentSequence = frame.sequence }
         }
     }
-    func audioReference(_ generation: UUID, now: Double) -> AudioVideoAnchor? {
+    func audioReference(_ generation: UUID, now: Double, maxAnchorAge: Double = 0.25) -> AudioVideoAnchor? {
         state.withLock {
             guard $0.accepting, $0.generation == generation, let anchor = $0.audioAnchor,
                 now.isFinite, anchor.value.hostTime - now <= AudioSyncController.futureAnchorTolerance,
                 now - $0.statistics.lastInputTime <= 0.25,
-                now - anchor.value.hostTime <= 0.25
+                now - anchor.value.hostTime <= maxAnchorAge
                     || (($0.latestContentSequence ?? anchor.sequence) <= anchor.sequence
                         && $0.duplicateInputTime > 0 && now - $0.duplicateInputTime <= 0.25)
             else { return nil }
             return anchor.value
         }
     }
-    func flush(_ generation: UUID, fromSequence: Int64 = 0) {
+    func flush(_ generation: UUID, fromSequence: Int64 = 0, preserveAudioAnchor: Bool = false) {
         state.withLock {
             guard $0.generation == generation else { return }
-            $0.invalidateTimeline(fromSequence: max($0.minimumSourceSequence, fromSequence))
+            $0.invalidateTimeline(
+                fromSequence: max($0.minimumSourceSequence, fromSequence),
+                preserveAudioAnchor: preserveAudioAnchor)
             $0.trace?.append(FrameTraceEvent(.reset, at: mediaHostTime()))
         }
     }
@@ -986,7 +994,7 @@ final class FrameMailbox: Sendable {
                 {
                     $0.audioAnchor = (
                         AudioVideoAnchor(
-                            time: frame.video.presentationTime, hostTime: time, revision: $0.timelineRevision),
+                            time: frame.video.presentationTime, hostTime: time, revision: $0.audioTimelineRevision),
                         frame.video.sequence
                     )
                 }

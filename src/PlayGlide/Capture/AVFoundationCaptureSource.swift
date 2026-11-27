@@ -110,6 +110,89 @@ actor CaptureCatalog {
         return cfString as String
     }
 
+    private static func coreAudioUInt32(
+        objectID: AudioObjectID, selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope
+    ) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value)
+        return status == noErr ? value : nil
+    }
+
+    /// Queries the active CoreAudio output device's combined hardware + stream + safety + I/O buffer latency.
+    static func audioOutputLatencySeconds(uniqueID: String?) -> Double {
+        let deviceID: AudioObjectID
+        if let uniqueID, !uniqueID.isEmpty {
+            var resolved = AudioObjectID(kAudioObjectUnknown)
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            var cfUID: CFString = uniqueID as CFString
+            var size = UInt32(MemoryLayout<AudioObjectID>.size)
+            let status = withUnsafeMutablePointer(to: &cfUID) { uidPointer in
+                AudioObjectGetPropertyData(
+                    AudioObjectID(kAudioObjectSystemObject), &address,
+                    UInt32(MemoryLayout<CFString>.size), uidPointer, &size, &resolved)
+            }
+            guard status == noErr, resolved != AudioObjectID(kAudioObjectUnknown) else { return 0 }
+            deviceID = resolved
+        } else {
+            var defaultID = AudioObjectID(kAudioObjectUnknown)
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            var size = UInt32(MemoryLayout<AudioObjectID>.size)
+            guard
+                AudioObjectGetPropertyData(
+                    AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &defaultID) == noErr,
+                defaultID != AudioObjectID(kAudioObjectUnknown)
+            else { return 0 }
+            deviceID = defaultID
+        }
+        var sampleRateAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var sampleRate: Double = 0
+        var sampleRateSize = UInt32(MemoryLayout<Double>.size)
+        guard
+            AudioObjectGetPropertyData(deviceID, &sampleRateAddress, 0, nil, &sampleRateSize, &sampleRate) == noErr,
+            sampleRate.isFinite, sampleRate >= 8_000
+        else { return 0 }
+
+        let scope = kAudioDevicePropertyScopeOutput
+        let deviceLatency =
+            coreAudioUInt32(objectID: deviceID, selector: kAudioDevicePropertyLatency, scope: scope) ?? 0
+        let safetyOffset =
+            coreAudioUInt32(objectID: deviceID, selector: kAudioDevicePropertySafetyOffset, scope: scope) ?? 0
+        let bufferFrames =
+            coreAudioUInt32(objectID: deviceID, selector: kAudioDevicePropertyBufferFrameSize, scope: scope) ?? 0
+
+        var streamLatency: UInt32 = 0
+        var streamsAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+        var streamsSize: UInt32 = 0
+        if AudioObjectGetPropertyDataSize(deviceID, &streamsAddress, 0, nil, &streamsSize) == noErr,
+            streamsSize >= UInt32(MemoryLayout<AudioStreamID>.size)
+        {
+            var streams = [AudioStreamID](repeating: 0, count: Int(streamsSize) / MemoryLayout<AudioStreamID>.size)
+            if AudioObjectGetPropertyData(deviceID, &streamsAddress, 0, nil, &streamsSize, &streams) == noErr,
+                let first = streams.first
+            {
+                streamLatency =
+                    coreAudioUInt32(
+                        objectID: first, selector: kAudioStreamPropertyLatency, scope: kAudioObjectPropertyScopeGlobal)
+                    ?? 0
+            }
+        }
+        let totalSeconds = Double(deviceLatency + streamLatency + safetyOffset + bufferFrames) / sampleRate
+        return totalSeconds.isFinite ? min(0.25, max(0, totalSeconds)) : 0
+    }
+
     static func availableAudioDevices() -> [AVCaptureDevice] {
         AVCaptureDevice.DiscoverySession(
             deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified
@@ -648,6 +731,58 @@ final class CaptureAudioMonitor: Sendable {
         }
         return PresentationMode.fastPassthroughEnabled
     }
+    /// Smooth audio continuity under transient video pauses, hot mode switches, USB timestamp micro-jitter,
+    /// and tight CoreAudio output latency (`PLAYGLIDE_AUDIO_SMOOTH_SYNC=0` restores legacy behavior for A/B).
+    static var smoothSyncEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_AUDIO_SMOOTH_SYNC"] != "0"
+    }
+    /// Emit opt-in audio synchronization diagnostics to stderr (`PLAYGLIDE_AUDIO_TRACE=1`).
+    static var traceEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_AUDIO_TRACE"] == "1"
+    }
+
+    private struct TraceWindow {
+        var lastSummaryHost: Double = 0
+        var minGapUs: Double = .infinity
+        var maxGapUs: Double = -.infinity
+        var minHeadroomMs: Double = .infinity
+        var maxHeadroomMs: Double = -.infinity
+        var minEnqueuedHeadroomMs: Double = .infinity
+        var minErrorMs: Double = .infinity
+        var maxErrorMs: Double = -.infinity
+        var lastPacketDurationMs: Double = 0
+        var lateSkips = 0
+        var rateCalls = 0
+        var automaticFlushes = 0
+        var discontinuityResets = 0
+        var pauses = 0
+        var aligns = 0
+        var receivedInWindow = 0
+        var enqueuedInWindow = 0
+
+        mutating func resetWindow(at now: Double) {
+            lastSummaryHost = now
+            minGapUs = .infinity
+            maxGapUs = -.infinity
+            minHeadroomMs = .infinity
+            maxHeadroomMs = -.infinity
+            minEnqueuedHeadroomMs = .infinity
+            minErrorMs = .infinity
+            maxErrorMs = -.infinity
+            lateSkips = 0
+            rateCalls = 0
+            automaticFlushes = 0
+            discontinuityResets = 0
+            pauses = 0
+            aligns = 0
+            receivedInWindow = 0
+            enqueuedInWindow = 0
+        }
+    }
+
+    private static func emitTrace(_ line: String) {
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
 
     private struct PCM: Sendable {
         let data: CMReadOnlyDataBlockBuffer
@@ -684,8 +819,11 @@ final class CaptureAudioMonitor: Sendable {
         var buffers = AudioBufferQueue<PCM>()
         var controller = AudioSyncController()
         var alignmentWaitStartedAt: Double?
+        var coldAnchorWaitStartedAt: Double?
         var nextSequence: Int64 = 0
         var lastReceived: Double = 0
+        var lastEnqueuedEnd: CMTime = .invalid
+        var autoSafetyOffsetSeconds: Double = 0
         var sampleRate: Double = 0
         var channels: UInt32 = 0
         var appliedGain: (volume: Float, muted: Bool)?
@@ -695,6 +833,7 @@ final class CaptureAudioMonitor: Sendable {
         var lastTelemetry: PublishedAudioTelemetry?
         var lastTelemetryError: Double?
         var lastTelemetryTime: Double = 0
+        var trace = TraceWindow()
     }
     private let state = Mutex(State())
     private let mailbox: FrameMailbox
@@ -704,6 +843,8 @@ final class CaptureAudioMonitor: Sendable {
     private let resolveOutputDevice: @Sendable (String) -> String?
     private let hostTime: @Sendable () -> Double
     private let immediatePump: Bool
+    private let smoothSync: Bool
+    private let trace: Bool
 
     init(
         mailbox: FrameMailbox, generation: UUID,
@@ -714,6 +855,8 @@ final class CaptureAudioMonitor: Sendable {
         },
         hostTime: @escaping @Sendable () -> Double = { mediaHostTime() },
         immediatePump: Bool = CaptureAudioMonitor.immediatePumpEnabled,
+        smoothSync: Bool = CaptureAudioMonitor.smoothSyncEnabled,
+        trace: Bool = CaptureAudioMonitor.traceEnabled,
         failure: @escaping @Sendable (AppText) -> Void
     ) {
         self.mailbox = mailbox
@@ -723,6 +866,8 @@ final class CaptureAudioMonitor: Sendable {
         self.resolveOutputDevice = resolveOutputDevice
         self.hostTime = hostTime
         self.immediatePump = immediatePump
+        self.smoothSync = smoothSync
+        self.trace = trace
     }
 
     func start(on queue: DispatchQueue? = nil) {
@@ -812,7 +957,22 @@ final class CaptureAudioMonitor: Sendable {
                 return
             }
             let result = $0.buffers.append(
-                time: pts, duration: duration, payload: PCM(data: data, format: format, sampleCount: sampleCount))
+                time: pts, duration: duration, payload: PCM(data: data, format: format, sampleCount: sampleCount),
+                negativeJitterTolerance: smoothSync ? 0.002 : 0.000_001)
+            if trace {
+                let gapUs = $0.buffers.lastGapSeconds * 1_000_000
+                $0.trace.minGapUs = min($0.trace.minGapUs, gapUs)
+                $0.trace.maxGapUs = max($0.trace.maxGapUs, gapUs)
+                $0.trace.lastPacketDurationMs = duration.seconds * 1000
+                $0.trace.receivedInWindow += 1
+                if result.reset {
+                    $0.trace.discontinuityResets += 1
+                    Self.emitTrace(
+                        String(
+                            format: "PLAYGLIDE_AUDIO_EVENT kind=discontinuity gapUs=%.1f pts=%.4f durMs=%.2f",
+                            gapUs, pts.seconds, duration.seconds * 1000))
+                }
+            }
             if result.reset { resetPlayback(&$0, clearBuffers: false) }
             $0.lastReceived = hostTime()
             mailbox.mutate(generation) {
@@ -871,6 +1031,13 @@ final class CaptureAudioMonitor: Sendable {
                 state.appliedOutputUID = resolvedOutput
             }
             if flushed || (routeChanged && state.controller.rate > 0) {
+                if trace {
+                    if flushed { state.trace.automaticFlushes += 1 }
+                    Self.emitTrace(
+                        String(
+                            format: "PLAYGLIDE_AUDIO_EVENT kind=%@ now=%.3f outLatMs=%.2f",
+                            flushed ? "automaticFlush" : "routeChanged", now, output.outputLatencySeconds * 1000))
+                }
                 resetPlayback(&state, clearBuffers: false)
             }
         }
@@ -892,34 +1059,109 @@ final class CaptureAudioMonitor: Sendable {
                 return
             }
         }
-        let anchor = now - state.lastReceived <= 0.25 ? mailbox.audioReference(generation, now: now) : nil
-        let offsetSeconds = controls.offsetSeconds
-        let offsetTime = CMTime(seconds: offsetSeconds, preferredTimescale: 1_000_000_000)
-        // Require a covered start point when aligning. Steady playback can use already enqueued PCM.
+        let anchor =
+            now - state.lastReceived <= 0.25
+            ? mailbox.audioReference(generation, now: now, maxAnchorAge: smoothSync ? 1.0 : 0.25) : nil
+        let userOffsetSeconds = controls.offsetSeconds
+        let outputLatency = smoothSync ? output.outputLatencySeconds : 0
+        let requiredHeadroom = outputLatency > 0 ? outputLatency + 0.018 : 0
+        // Sample synchronizer playback time and host clock back-to-back after locks/route checks so
+        // rate slews never pass a stale hostTime into AVSampleBufferRenderSynchronizer.
         let buffers = state.buffers
         let playback = output.currentTime
+        let playbackNow = smoothSync ? hostTime() : now
+        // On macOS, each AVSampleBufferRenderSynchronizer.setRate call synchronously stalls CoreAudio for ~33–48 ms.
+        // Wait briefly (up to 450 ms) if the very first video frame has a cold pipeline-compile latency spike (> 95 ms
+        // audio headroom) so initial alignment locks directly onto steady-state latency with zero startup setRate calls.
+        var waitingForColdVideoSettle = false
+        if smoothSync, requiredHeadroom > 0, state.controller.revision == nil, let anchor,
+            let newestEnd = buffers.entries.last?.end
+        {
+            let userOffsetTime = CMTime(seconds: userOffsetSeconds, preferredTimescale: 1_000_000_000)
+            let rawStart = CMTimeSubtract(
+                anchor.mediaTime(at: playbackNow + AudioSyncController.startLead), userOffsetTime)
+            let available = CMTimeSubtract(newestEnd, rawStart).seconds
+            if available.isFinite, available > 0.095 {
+                let started = state.coldAnchorWaitStartedAt ?? playbackNow
+                state.coldAnchorWaitStartedAt = started
+                if playbackNow - started < 0.45 {
+                    waitingForColdVideoSettle = true
+                }
+            }
+            if !waitingForColdVideoSettle {
+                state.coldAnchorWaitStartedAt = nil
+                if available.isFinite, available < requiredHeadroom {
+                    state.autoSafetyOffsetSeconds = min(0.060, max(0, requiredHeadroom - available))
+                } else {
+                    state.autoSafetyOffsetSeconds = 0
+                }
+            }
+        } else if !smoothSync {
+            state.coldAnchorWaitStartedAt = nil
+            state.autoSafetyOffsetSeconds = 0
+        }
+        let effectiveOffsetSeconds = userOffsetSeconds + state.autoSafetyOffsetSeconds
+        let offsetTime = CMTime(seconds: effectiveOffsetSeconds, preferredTimescale: 1_000_000_000)
+        let bufferedHeadroom =
+            (playback.isNumeric ? buffers.entries.last.map { CMTimeSubtract($0.end, playback).seconds } : nil)
+        let preventSpeedup =
+            smoothSync && requiredHeadroom > 0
+            && (bufferedHeadroom.map { $0 < requiredHeadroom + 0.008 } ?? false)
         // A proposed alignment becomes the active clock only after playback is scheduled.
         var controller = state.controller
+        let hardwareSmoothSync = smoothSync && requiredHeadroom > 0
         let action = controller.update(
-            anchor: anchor, playbackTime: playback, now: now, offsetSeconds: offsetSeconds,
-            canAlign: anchor.map {
-                buffers.contains(CMTimeSubtract($0.mediaTime(at: now + AudioSyncController.startLead), offsetTime))
-            } ?? false)
+            anchor: anchor, playbackTime: playback, now: playbackNow, offsetSeconds: effectiveOffsetSeconds,
+            preventSpeedup: preventSpeedup,
+            slewEntryThreshold: hardwareSmoothSync ? 0.045 : 0.015,
+            slewExitThreshold: hardwareSmoothSync ? 0.010 : 0.004,
+            canAlign: !waitingForColdVideoSettle
+                && (anchor.map {
+                    buffers.contains(
+                        CMTimeSubtract($0.mediaTime(at: playbackNow + AudioSyncController.startLead), offsetTime))
+                } ?? false))
         var alignment: (CMTime, Double)?
         switch action {
         case .pause:
+            if trace {
+                state.trace.pauses += 1
+                Self.emitTrace(
+                    String(
+                        format: "PLAYGLIDE_AUDIO_EVENT kind=pause now=%.3f rxAgeMs=%.1f anchorNil=%@",
+                        playbackNow, (playbackNow - state.lastReceived) * 1000, anchor == nil ? "true" : "false"))
+            }
             resetPlayback(&state, clearBuffers: false)
         case .align(let time, let hostTime):
+            if trace {
+                state.trace.aligns += 1
+                let availMs =
+                    buffers.entries.last.map { CMTimeSubtract($0.end, time).seconds * 1000 } ?? -999
+                Self.emitTrace(
+                    String(
+                        format: "PLAYGLIDE_AUDIO_EVENT kind=align now=%.3f pts=%.4f availMs=%.2f"
+                            + " autoSafeMs=%.2f outLatMs=%.2f",
+                        playbackNow, time.seconds, availMs, state.autoSafetyOffsetSeconds * 1000,
+                        outputLatency * 1000))
+            }
             if state.controller.rate > 0 { resetPlayback(&state, clearBuffers: false) }
             state.nextSequence = state.buffers.entries.first?.sequence ?? 0
             alignment = (time, hostTime)
         case .rate(let rate):
-            // Anchor rate slews to the current (media, host) pair; passing invalid times stalls
+            if trace {
+                state.trace.rateCalls += 1
+                Self.emitTrace(
+                    String(
+                        format: "PLAYGLIDE_AUDIO_EVENT kind=rate now=%.3f rate=%.4f errMs=%.2f"
+                            + " filtMs=%.2f headroomMs=%.2f",
+                        playbackNow, rate, (controller.errorSeconds ?? 0) * 1000,
+                        (controller.filteredErrorSeconds ?? 0) * 1000, (bufferedHeadroom ?? -999) * 1000))
+            }
+            // Anchor rate slews to the freshly sampled (media, host) pair; passing invalid times stalls
             // AVSampleBufferRenderSynchronizer's timebase by ~21 ms per call on macOS (R8).
             if playback.isNumeric {
                 output.setRate(
                     rate, time: playback,
-                    hostTime: CMTime(seconds: now, preferredTimescale: 1_000_000_000))
+                    hostTime: CMTime(seconds: playbackNow, preferredTimescale: 1_000_000_000))
             } else {
                 output.setRate(rate, time: .invalid, hostTime: .invalid)
             }
@@ -928,16 +1170,16 @@ final class CaptureAudioMonitor: Sendable {
         let fastPath = FrameMailbox.fastPathEnabled
         guard let anchor, controller.rate > 0 else {
             state.controller = controller
-            if state.alignmentWaitStartedAt != nil { finishAlignmentWait(&state, at: now, failed: true) }
+            if state.alignmentWaitStartedAt != nil { finishAlignmentWait(&state, at: playbackNow, failed: true) }
             let telemetry = PublishedAudioTelemetry(
                 status: AppText("等待音频与视频呈现", "Waiting for audio and video"), rate: 0, muted: controls.muted,
                 volume: controls.clampedVolume, offsetMilliseconds: controls.clampedOffsetMilliseconds)
             if !fastPath || state.lastTelemetry != telemetry || state.lastTelemetryError != nil
-                || now - state.lastTelemetryTime >= 0.05
+                || playbackNow - state.lastTelemetryTime >= 0.05
             {
                 state.lastTelemetry = telemetry
                 state.lastTelemetryError = nil
-                state.lastTelemetryTime = now
+                state.lastTelemetryTime = playbackNow
                 mailbox.mutate(generation) {
                     $0.audioStatus = telemetry.status
                     $0.audioRate = telemetry.rate
@@ -950,10 +1192,18 @@ final class CaptureAudioMonitor: Sendable {
             return
         }
         let start = alignment?.0 ?? playback
-        let horizon = CMTimeSubtract(anchor.mediaTime(at: max(now, hostTime()) + 0.08), offsetTime)
+        let horizon = CMTimeSubtract(anchor.mediaTime(at: max(playbackNow, hostTime()) + 0.08), offsetTime)
         var enqueuedCount = 0
         for entry in state.buffers.entries where entry.sequence >= state.nextSequence {
             if CMTimeCompare(entry.end, start) <= 0 {
+                if alignment == nil, trace {
+                    state.trace.lateSkips += 1
+                    Self.emitTrace(
+                        String(
+                            format: "PLAYGLIDE_AUDIO_EVENT kind=lateSkip now=%.3f entryEnd=%.4f start=%.4f lateMs=%.2f",
+                            playbackNow, entry.end.seconds, start.seconds,
+                            CMTimeSubtract(start, entry.end).seconds * 1000))
+                }
                 state.nextSequence = entry.sequence + 1
                 continue
             }
@@ -965,7 +1215,44 @@ final class CaptureAudioMonitor: Sendable {
                 return
             }
             enqueuedCount += 1
+            state.lastEnqueuedEnd = entry.end
             state.nextSequence = entry.sequence + 1
+        }
+        if trace {
+            state.trace.enqueuedInWindow += enqueuedCount
+            if let bufferedHeadroom {
+                state.trace.minHeadroomMs = min(state.trace.minHeadroomMs, bufferedHeadroom * 1000)
+                state.trace.maxHeadroomMs = max(state.trace.maxHeadroomMs, bufferedHeadroom * 1000)
+            }
+            if playback.isNumeric, state.lastEnqueuedEnd.isNumeric {
+                let enqHeadroomMs = CMTimeSubtract(state.lastEnqueuedEnd, playback).seconds * 1000
+                state.trace.minEnqueuedHeadroomMs = min(state.trace.minEnqueuedHeadroomMs, enqHeadroomMs)
+            }
+            if let err = controller.errorSeconds {
+                state.trace.minErrorMs = min(state.trace.minErrorMs, err * 1000)
+                state.trace.maxErrorMs = max(state.trace.maxErrorMs, err * 1000)
+            }
+            if state.trace.lastSummaryHost == 0 { state.trace.lastSummaryHost = playbackNow }
+            if playbackNow - state.trace.lastSummaryHost >= 1.0 {
+                let t = state.trace
+                let f = { (v: Double) -> String in v.isFinite ? String(format: "%.2f", v) : "-" }
+                Self.emitTrace(
+                    "PLAYGLIDE_AUDIO_TRACE t=\(String(format: "%.2f", playbackNow))"
+                        + " pktMs=\(f(t.lastPacketDurationMs))"
+                        + " rx=\(t.receivedInWindow) enq=\(t.enqueuedInWindow)"
+                        + " gapUs=[\(f(t.minGapUs)),\(f(t.maxGapUs))]"
+                        + " headMs=[\(f(t.minHeadroomMs)),\(f(t.maxHeadroomMs))]"
+                        + " enqHeadMinMs=\(f(t.minEnqueuedHeadroomMs))"
+                        + " errMs=[\(f(t.minErrorMs)),\(f(t.maxErrorMs))]"
+                        + " filtMs=\(f((controller.filteredErrorSeconds ?? .nan) * 1000))"
+                        + " rate=\(String(format: "%.4f", controller.rate))"
+                        + " autoSafeMs=\(String(format: "%.1f", state.autoSafetyOffsetSeconds * 1000))"
+                        + " outLatMs=\(String(format: "%.1f", outputLatency * 1000))"
+                        + " lateSkips=\(t.lateSkips) rateCalls=\(t.rateCalls) flushes=\(t.automaticFlushes)"
+                        + " pauses=\(t.pauses) aligns=\(t.aligns)"
+                )
+                state.trace.resetWindow(at: playbackNow)
+            }
         }
         if let (time, hostTime) = alignment {
             guard enqueuedCount > 0 else {
@@ -1044,6 +1331,9 @@ final class CaptureAudioMonitor: Sendable {
         value.playback?.setRate(0, time: .invalid, hostTime: .invalid)
         value.playback?.flush()
         value.controller = AudioSyncController()
+        value.coldAnchorWaitStartedAt = nil
+        value.lastEnqueuedEnd = .invalid
+        value.autoSafetyOffsetSeconds = 0
         if clearBuffers { value.buffers.removeAll() }
         value.nextSequence = value.buffers.entries.first?.sequence ?? 0
     }
@@ -1083,12 +1373,17 @@ protocol CaptureAudioPlayback: AnyObject {
     var currentTime: CMTime { get }
     var isReady: Bool { get }
     var failure: AppText? { get }
+    var outputLatencySeconds: Double { get }
     func setRate(_ rate: Float, time: CMTime, hostTime: CMTime)
     func setGain(volume: Float, muted: Bool)
     func setOutputDevice(uniqueID: String?)
     func consumeAutomaticFlush() -> Bool
     func enqueue(_ buffer: CMSampleBuffer)
     func flush()
+}
+
+extension CaptureAudioPlayback {
+    var outputLatencySeconds: Double { 0 }
 }
 
 final class SampleBufferAudioPlayback: CaptureAudioPlayback {
@@ -1099,8 +1394,10 @@ final class SampleBufferAudioPlayback: CaptureAudioPlayback {
     private let synchronizer = AVSampleBufferRenderSynchronizer()
     private let flushedAutomatically = FlushFlag()
     private var flushObserver: (any NSObjectProtocol)?
+    private(set) var outputLatencySeconds: Double
 
     init() {
+        outputLatencySeconds = CaptureCatalog.audioOutputLatencySeconds(uniqueID: nil)
         synchronizer.addRenderer(renderer)
         synchronizer.delaysRateChangeUntilHasSufficientMediaData = false
         renderer.audioTimePitchAlgorithm = .varispeed
@@ -1135,6 +1432,7 @@ final class SampleBufferAudioPlayback: CaptureAudioPlayback {
         if renderer.audioOutputDeviceUniqueID != uniqueID {
             renderer.audioOutputDeviceUniqueID = uniqueID
         }
+        outputLatencySeconds = CaptureCatalog.audioOutputLatencySeconds(uniqueID: uniqueID)
     }
     func consumeAutomaticFlush() -> Bool {
         flushedAutomatically.value.withLock {
