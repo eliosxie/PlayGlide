@@ -147,6 +147,11 @@ inline half2 sampleBilateralChroma(
     half d10 = centerRawY - y10;
     half d01 = centerRawY - y01;
     half d11 = centerRawY - y11;
+    // Smooth-luma early-out: when all four 4:2:0 luma corners match centerRawY within ~4/255,
+    // bilateral weights collapse to bilinear, saving three nearest chroma fetches per pixel.
+    if (max(max(abs(d00), abs(d10)), max(abs(d01), abs(d11))) < half(0.016)) {
+        return chromaTex.sample(previewSampler, uv + chromaOffset).rg;
+    }
     half w00 = sw00 / fma(d00 * d00, half(1200.0), half(1.0));
     half w10 = sw10 / fma(d10 * d10, half(1200.0), half(1.0));
     half w01 = sw01 / fma(d01 * d01, half(1200.0), half(1.0));
@@ -776,8 +781,8 @@ fragment half4 previewHybridFragment(
     half yA = half(0.0), yB = half(0.0);
     half2 caUV = half2(0.0), cbUV = half2(0.0);
     if (lowStatic) {
-        sampleStaticPlane(aTex, aChroma, uv, u.offsets.xy, src, windowAA, bilateralChroma, yA, caUV);
-        sampleStaticPlane(bTex, bChroma, uv, u.offsets.zw, src, windowAA, bilateralChroma, yB, cbUV);
+        sampleStaticPlane(aTex, aChroma, uv, u.offsets.xy, src, windowAA, false, yA, caUV);
+        sampleStaticPlane(bTex, bChroma, uv, u.offsets.zw, src, windowAA, false, yB, cbUV);
         half dY = (yA - yB) * half(255.0 / 219.0);
         half2 dCbCr = (caUV - cbUV) * half(255.0 / 224.0);
         half dR, dG, dB;
@@ -797,7 +802,9 @@ fragment half4 previewHybridFragment(
         }
         if (staticW >= half(0.999) && pairedConfidence == half(0.0)) {
             half rawStaticY = mix(yA, yB, tHalf);
-            half2 rawStaticUV = mix(caUV, cbUV, tHalf);
+            half2 rawStaticUV = (bilateralChroma && !windowAA)
+                ? sampleBilateralChroma(aTex, aChroma, uv, u.offsets.xy, rawStaticY)
+                : mix(caUV, cbUV, tHalf);
             if (hdr10Deband && hdrMode >= 1u && !windowAA) {
                 rawStaticY = debandHDR10Luma(aTex, uv, px, src.clampRect, rawStaticY);
             }
@@ -959,8 +966,8 @@ fragment half4 previewHybridFragment(
             half midDev = max(half(0.0), max(min(lowAY, lowBY) - midY, midY - max(lowAY, lowBY)));
             half stYA = half(0.0), stYB = half(0.0);
             half2 stCA = half2(0.0), stCB = half2(0.0);
-            sampleStaticPlane(aTex, aChroma, uv, u.offsets.xy, src, windowAA, bilateralChroma, stYA, stCA);
-            sampleStaticPlane(bTex, bChroma, uv, u.offsets.zw, src, windowAA, bilateralChroma, stYB, stCB);
+            sampleStaticPlane(aTex, aChroma, uv, u.offsets.xy, src, windowAA, false, stYA, stCA);
+            sampleStaticPlane(bTex, bChroma, uv, u.offsets.zw, src, windowAA, false, stYB, stCB);
             half dSC = length((stCA - stCB) * half(255.0 / 224.0));
             half strokeW = (half(1.0) - smoothstep(half(0.005), half(0.012), dSY))
                 * (half(1.0) - smoothstep(half(0.012), half(0.024), dSC))
