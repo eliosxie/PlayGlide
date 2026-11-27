@@ -8,11 +8,32 @@ actor PipelineSession {
     static var userInteractiveQoSEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_PIPELINE_UI_QOS"] != "0"
     }
+    /// Reset deduplication and interpolation references whenever input color mode transitions between SDR
+    /// and HDR10 PQ (`PLAYGLIDE_COLOR_MODE_RESET=0` restores legacy size/epoch-only input resets for A/B).
+    static var colorModeResetEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_COLOR_MODE_RESET"] != "0"
+    }
+
+    static func inputResetReason(
+        previousSize: VideoSize?, size: VideoSize,
+        previousEpoch: UInt64?, epoch: UInt64?,
+        previousHDR10: Bool?, isHDR10: Bool,
+        resetsOnColorModeChange: Bool = PipelineSession.colorModeResetEnabled
+    ) -> HistoryResetReason? {
+        if previousSize == nil { return .startup }
+        if previousSize != size { return .inputSizeChanged }
+        if previousEpoch != epoch { return .windowTimestampEpoch }
+        if resetsOnColorModeChange, let previousHDR10, previousHDR10 != isHDR10 {
+            return .colorModeChanged
+        }
+        return nil
+    }
 
     let generation: UUID
     private(set) var settings: SessionDraft
     let mailbox: FrameMailbox
     nonisolated let usesUserInteractiveQueue: Bool
+    private let resetsOnColorModeChange: Bool
     private let executorQueue: DispatchSerialQueue
     private let source: any VideoCaptureSource
     private let processor: FrameProcessor
@@ -48,7 +69,9 @@ actor PipelineSession {
         settings: SessionDraft, format: CaptureFormatDescriptor?, generation: UUID, mailbox: FrameMailbox,
         windowSource: WindowCaptureSource? = nil, preferFlowTextureViews: Bool = true,
         performanceHoldSettle: Double = PerformanceHold.settleSeconds,
-        useUserInteractiveQueue: Bool = PipelineSession.userInteractiveQoSEnabled
+        useUserInteractiveQueue: Bool = PipelineSession.userInteractiveQoSEnabled,
+        resetsOnColorModeChange: Bool = PipelineSession.colorModeResetEnabled,
+        customSource: (any VideoCaptureSource)? = nil
     ) throws {
         guard settings.isAvailableInBuild else {
             throw PipelineError(AppText("当前版本不支持所选采集设置。", "The selected capture settings are unavailable."))
@@ -58,33 +81,40 @@ actor PipelineSession {
         self.generation = generation
         self.mailbox = mailbox
         self.usesUserInteractiveQueue = useUserInteractiveQueue
+        self.resetsOnColorModeChange = resetsOnColorModeChange
         self.executorQueue = DispatchSerialQueue(
             label: "PlayGlide.pipeline.session",
             qos: useUserInteractiveQueue ? .userInteractive : .unspecified)
         self.windowSource = settings.source == .window ? windowSource : nil
-        switch settings.source {
-        case .testPattern:
-            #if PLAYGLIDE_DEVELOPMENT
-                source = SyntheticVideoSource(
-                    size: settings.inputPreset.size, signal: settings.testSignal,
-                    mailbox: mailbox, generation: generation)
-            #else
-                throw PipelineError(AppText("请连接并选择采集卡。", "Connect and select a capture card."))
-            #endif
-        case .window:
-            guard let windowSource, settings.windowSelectionID == windowSource.id else {
-                throw PipelineError(AppText("请先选择播放视频的浏览器窗口", "Choose a window playing video to start capture."))
+        if let customSource {
+            source = customSource
+        } else {
+            switch settings.source {
+            case .testPattern:
+                #if PLAYGLIDE_DEVELOPMENT
+                    source = SyntheticVideoSource(
+                        size: settings.inputPreset.size, signal: settings.testSignal,
+                        mailbox: mailbox, generation: generation)
+                #else
+                    throw PipelineError(AppText("请连接并选择采集卡。", "Connect and select a capture card."))
+                #endif
+            case .window:
+                guard let windowSource, settings.windowSelectionID == windowSource.id else {
+                    throw PipelineError(
+                        AppText("请先选择播放视频的浏览器窗口", "Choose a window playing video to start capture."))
+                }
+                source = windowSource
+            case .captureCard:
+                guard let format, !settings.deviceID.isEmpty else {
+                    throw PipelineError(
+                        AppText("请选择采集卡及真实输入格式", "Select a capture card and an available input format."))
+                }
+                source = AVFoundationCaptureSource(
+                    deviceID: settings.deviceID, format: format,
+                    mailbox: mailbox, generation: generation,
+                    audioEnabled: settings.audioEnabled, audioDeviceID: settings.audioDeviceID,
+                    colorMode: settings.colorMode)
             }
-            source = windowSource
-        case .captureCard:
-            guard let format, !settings.deviceID.isEmpty else {
-                throw PipelineError(AppText("请选择采集卡及真实输入格式", "Select a capture card and an available input format."))
-            }
-            source = AVFoundationCaptureSource(
-                deviceID: settings.deviceID, format: format,
-                mailbox: mailbox, generation: generation,
-                audioEnabled: settings.audioEnabled, audioDeviceID: settings.audioDeviceID,
-                colorMode: settings.colorMode)
         }
         processor = FrameProcessor(
             settings: settings, generation: generation, mailbox: mailbox,
@@ -112,6 +142,7 @@ actor PipelineSession {
         var fastContentRun = 0
         var previousSize: VideoSize?
         var windowEpoch: UInt64?
+        var previousHDR10: Bool?
         var duplicateWork = 0.0
         var lastContentArrival: Double?
         var hold = PerformanceHold.applies(to: activeSettings) ? PerformanceHold() : nil
@@ -164,16 +195,12 @@ actor PipelineSession {
                     }
                 }
                 let size = frame.size
-                let inputResetReason: HistoryResetReason?
-                if previousSize == nil {
-                    inputResetReason = .startup
-                } else if previousSize != size {
-                    inputResetReason = .inputSizeChanged
-                } else if windowEpoch != frame.windowStamp?.epoch {
-                    inputResetReason = .windowTimestampEpoch
-                } else {
-                    inputResetReason = nil
-                }
+                let isHDR10 = frame.pixelBuffer.withUnsafeBuffer { PixelConverter.isHDR10PQ($0) }
+                let inputResetReason = Self.inputResetReason(
+                    previousSize: previousSize, size: size,
+                    previousEpoch: windowEpoch, epoch: frame.windowStamp?.epoch,
+                    previousHDR10: previousHDR10, isHDR10: isHDR10,
+                    resetsOnColorModeChange: resetsOnColorModeChange)
                 if inputResetReason != nil {
                     detector.reset()
                     cadence.reset()
@@ -181,6 +208,7 @@ actor PipelineSession {
                 }
                 previousSize = size
                 windowEpoch = frame.windowStamp?.epoch
+                previousHDR10 = isHDR10
                 let start = mediaHostTime()
                 let duplicate = detector.isDuplicate(frame, confirmDuplicate: activeSettings.contentMode == .automatic)
                 let sceneCut = detector.sceneCut

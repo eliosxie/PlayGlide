@@ -38,7 +38,7 @@ struct PictureSignature: Sendable, Equatable {
 }
 
 enum HistoryResetReason: String, Sendable {
-    case startup, inputSizeChanged, windowTimestampEpoch, timelineDiscontinuity
+    case startup, inputSizeChanged, windowTimestampEpoch, colorModeChanged, timelineDiscontinuity
     case cadenceChanged, inputGap, staticHold, sceneCut, contentRectChanged
 }
 
