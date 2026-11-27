@@ -159,12 +159,35 @@ inline half2 sampleBilateralChroma(
     half2 uv11 = chromaTex.sample(previewNearestSampler, c11).rg;
     return (uv00 * w00 + uv10 * w10 + uv01 * w01 + uv11 * w11) / max(wSum, half(1e-4));
 }
+// Gradient-preserving 2-tap symmetric integer-offset luma debanding for 8-bit UVC HDR10 PQ inputs.
+// Uses two L1-coherent nearest texel taps (zero bilinear edge bleed, zero trig, branchless ALU) so
+// 1..2 LSB PQ quantization bands blend continuously into 10-bit output while fine text/edges (>3 LSB)
+// strictly bypass.
+inline half debandHDR10Luma(
+    texture2d<half, access::sample> lumaTex,
+    float2 uv, float2 px, float4 clampRect, half rawY
+) {
+    float h0 = fract(52.9829189f * fract(dot(px, float2(0.06711056f, 0.00583715f))));
+    float h1 = fract(h0 * 1.6180339f + 0.37f);
+    float2 texStep = 1.0f / float2(lumaTex.get_width(), lumaTex.get_height());
+    float dx = floor(1.0f + 9.0f * h0);
+    float sy = fract(h1 * 2.0f);
+    float dy = floor(1.0f + 9.0f * sy) * ((h1 >= 0.5f) ? 1.0f : -1.0f);
+    float2 dir = float2(dx, dy) * texStep;
+
+    half y0 = lumaTex.sample(previewNearestSampler, clamp(uv + dir, clampRect.xy, clampRect.zw)).r;
+    half y1 = lumaTex.sample(previewNearestSampler, clamp(uv - dir, clampRect.xy, clampRect.zw)).r;
+    half maxDiffY = max(abs(y0 - rawY), abs(y1 - rawY));
+    half wY = half(1.0) - smoothstep(half(1.8 / 255.0), half(3.2 / 255.0), maxDiffY);
+    return mix(rawY, (y0 + y1) * half(0.5), wY);
+}
 inline half3 sampleSource(
     texture2d<half, access::sample> primaryTex,
     texture2d<half, access::sample> chromaTex,
     SourceUniforms src,
     float2 px,
-    bool bilateralChroma = false
+    bool bilateralChroma = false,
+    bool hdr10Deband = false
 ) {
     if (px.x < src.fitRect.x || px.x >= src.fitMax.x || px.y < src.fitRect.y || px.y >= src.fitMax.y) {
         return half3(0.0h);
@@ -199,11 +222,14 @@ inline half3 sampleSource(
         }
     } else if (src.flags.x > 0.5f) {
         half rawY = primaryTex.sample(previewSampler, uv).r;
-        half y = fma(rawY, half(255.0 / 219.0), half(-16.0 / 219.0));
         // flags.zw moves from chroma texel centers to the surface's 4:2:0 sample positions.
         half2 chroma = bilateralChroma
             ? sampleBilateralChroma(primaryTex, chromaTex, uv, src.flags.zw, rawY)
             : chromaTex.sample(previewSampler, uv + src.flags.zw).rg;
+        if (hdr10Deband && hdrMode >= 1u) {
+            rawY = debandHDR10Luma(primaryTex, uv, px, src.clampRect, rawY);
+        }
+        half y = fma(rawY, half(255.0 / 219.0), half(-16.0 / 219.0));
         half2 cbcr = fma(chroma, half(255.0 / 224.0), half(-128.0 / 224.0));
         rgb = decodeYCbCr(y, cbcr, hdrMode);
     } else {
@@ -258,26 +284,27 @@ fragment half4 previewFragment(
     float2 px = in.position.xy;
     uint postFlags = uint(uniforms.post.y + 0.5f);
     bool bilateralChroma = (postFlags & 1u) != 0u;
+    bool hdr10Deband = (postFlags & 2u) != 0u;
     bool useOriginal = uniforms.split.x > 0.5f && px.x < uniforms.split.y;
     SourceUniforms activeSrc = useOriginal ? uniforms.original : uniforms.primary;
     half3 rgb = useOriginal
-        ? sampleSource(originalTex, originalChroma, activeSrc, px, bilateralChroma)
-        : sampleSource(primaryTex, primaryChroma, activeSrc, px, bilateralChroma);
+        ? sampleSource(originalTex, originalChroma, activeSrc, px, bilateralChroma, hdr10Deband)
+        : sampleSource(primaryTex, primaryChroma, activeSrc, px, bilateralChroma, hdr10Deband);
     if (uniforms.post.x > 0.001f
         && px.x >= activeSrc.fitRect.x && px.x < activeSrc.fitMax.x
         && px.y >= activeSrc.fitRect.y && px.y < activeSrc.fitMax.y) {
         half3 n = useOriginal
-            ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(0.0f, -1.0f), bilateralChroma)
-            : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(0.0f, -1.0f), bilateralChroma);
+            ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(0.0f, -1.0f), bilateralChroma, hdr10Deband)
+            : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(0.0f, -1.0f), bilateralChroma, hdr10Deband);
         half3 s = useOriginal
-            ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(0.0f, 1.0f), bilateralChroma)
-            : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(0.0f, 1.0f), bilateralChroma);
+            ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(0.0f, 1.0f), bilateralChroma, hdr10Deband)
+            : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(0.0f, 1.0f), bilateralChroma, hdr10Deband);
         half3 e = useOriginal
-            ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(1.0f, 0.0f), bilateralChroma)
-            : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(1.0f, 0.0f), bilateralChroma);
+            ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(1.0f, 0.0f), bilateralChroma, hdr10Deband)
+            : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(1.0f, 0.0f), bilateralChroma, hdr10Deband);
         half3 w = useOriginal
-            ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(-1.0f, 0.0f), bilateralChroma)
-            : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(-1.0f, 0.0f), bilateralChroma);
+            ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(-1.0f, 0.0f), bilateralChroma, hdr10Deband)
+            : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(-1.0f, 0.0f), bilateralChroma, hdr10Deband);
         bool bt2020 = activeSrc.flags.x > 1.5f;
         rgb = previewApplyRCAS(rgb, n, s, e, w, half(uniforms.post.x), bt2020);
     }
@@ -686,13 +713,14 @@ fragment half4 previewHybridFragment(
     }
     uint postFlags = uint(u.post.y + 0.5f);
     bool bilateralChroma = (postFlags & 1u) != 0u;
+    bool hdr10Deband = (postFlags & 2u) != 0u;
     if (u.split.x > 0.5f && px.x < u.split.y) {
-        half3 orig = sampleSource(aTex, aChroma, src, px, bilateralChroma);
+        half3 orig = sampleSource(aTex, aChroma, src, px, bilateralChroma, hdr10Deband);
         if (u.post.x > 0.001f) {
-            half3 n = sampleSource(aTex, aChroma, src, px + float2(0.0f, -1.0f), bilateralChroma);
-            half3 s = sampleSource(aTex, aChroma, src, px + float2(0.0f, 1.0f), bilateralChroma);
-            half3 e = sampleSource(aTex, aChroma, src, px + float2(1.0f, 0.0f), bilateralChroma);
-            half3 w = sampleSource(aTex, aChroma, src, px + float2(-1.0f, 0.0f), bilateralChroma);
+            half3 n = sampleSource(aTex, aChroma, src, px + float2(0.0f, -1.0f), bilateralChroma, hdr10Deband);
+            half3 s = sampleSource(aTex, aChroma, src, px + float2(0.0f, 1.0f), bilateralChroma, hdr10Deband);
+            half3 e = sampleSource(aTex, aChroma, src, px + float2(1.0f, 0.0f), bilateralChroma, hdr10Deband);
+            half3 w = sampleSource(aTex, aChroma, src, px + float2(-1.0f, 0.0f), bilateralChroma, hdr10Deband);
             orig = previewApplyRCAS(orig, n, s, e, w, half(u.post.x), src.flags.x > 1.5f);
         }
         if (u.split.z > 0.0f) {
@@ -754,7 +782,12 @@ fragment half4 previewHybridFragment(
                 lowATex, lowAChroma, lowBTex, lowBChroma, lowMidTex, lowMidChroma, uv);
         }
         if (staticW >= half(0.999) && pairedConfidence == half(0.0)) {
-            half yStatic = saturate(previewNv12Luma(mix(yA, yB, tHalf)));
+            half rawStaticY = mix(yA, yB, tHalf);
+            half2 rawStaticUV = mix(caUV, cbUV, tHalf);
+            if (hdr10Deband && hdrMode >= 1u && !windowAA) {
+                rawStaticY = debandHDR10Luma(aTex, uv, px, src.clampRect, rawStaticY);
+            }
+            half yStatic = saturate(previewNv12Luma(rawStaticY));
             if (rcasStrength > half(0.001)) {
                 half yN = saturate(previewNv12Luma(mix(
                     aTex.sample(previewSampler, clamp(uv + float2(0.0f, -pxUVStep.y), src.clampRect.xy, src.clampRect.zw)).r,
@@ -774,7 +807,7 @@ fragment half4 previewHybridFragment(
                     tHalf)));
                 yStatic = previewApplyLumaRCAS(yStatic, yN, yS, yE, yW, rcasStrength);
             }
-            half2 cbcrStatic = fma(mix(caUV, cbUV, tHalf), half(255.0 / 224.0), half(-128.0 / 224.0));
+            half2 cbcrStatic = fma(rawStaticUV, half(255.0 / 224.0), half(-128.0 / 224.0));
             half3 rgb = finalizePreviewColor(decodeYCbCr(yStatic, cbcrStatic, hdrMode), colorMode);
             if (u.split.z > 0.0f) rgb = saturate(rgb + half3(triangularDither(px) * half(u.split.z)));
             return half4(rgb, half(1.0));
@@ -985,6 +1018,11 @@ fragment half4 previewHybridFragment(
         y = previewApplyLumaRCAS(
             y, saturate(y + (rN - rC)), saturate(y + (rS - rC)),
             saturate(y + (rE - rC)), saturate(y + (rW - rC)), rcasStrength);
+    }
+    if (hdr10Deband && hdrMode >= 1u && !windowAA) {
+        half rawOutY = clamp(fma(y, half(219.0 / 255.0), half(16.0 / 255.0)), half(16.0 / 255.0), half(235.0 / 255.0));
+        rawOutY = debandHDR10Luma(lowMidTex, uv, px, src.clampRect, rawOutY);
+        y = saturate(previewNv12Luma(rawOutY));
     }
     half2 cbcr = fma(outChroma, half(255.0 / 224.0), half(-128.0 / 224.0));
     half3 rgb = finalizePreviewColor(decodeYCbCr(y, cbcr, hdrMode), colorMode);
