@@ -445,6 +445,7 @@ kernel void merge(texture2d<half, access::sample> a [[texture(0)]],
     bool bt2020 = (qualityFlags & 3u) >= 1u;
     bool softToe = (qualityFlags & 3u) >= 2u;
     bool iconEnvelope = (qualityFlags & 16u) != 0u;
+    bool adaptiveCAS = (qualityFlags & 32u) != 0u;
     half4 md = half4(0.0);
     bool lowStatic = false;
     if (hasMotion) {
@@ -475,6 +476,7 @@ kernel void merge(texture2d<half, access::sample> a [[texture(0)]],
     half2 midUV = lowMidChroma.sample(linearSampler, uv).rg;
     half3 midpoint = nv12Color(midRawY, midUV);
     half3 color = midpoint;
+    half motionConf = half(0.0);
     if (hasMotion) {
         half wA = md.z;
         half wB = md.w;
@@ -501,6 +503,7 @@ kernel void merge(texture2d<half, access::sample> a [[texture(0)]],
             half wb = half(t) * wB;
             half3 detail = (hiA * wa + hiB * wb) / max(wa + wb, half(1e-4));
             half conf = max(wA, wB);
+            motionConf = conf;
             half3 envMin = min(midpoint, min(wA > half(0.1) ? srcA : midpoint, wB > half(0.1) ? srcB : midpoint));
             half3 envMax = max(midpoint, max(wA > half(0.1) ? srcA : midpoint, wB > half(0.1) ? srcB : midpoint));
             color = clamp(midpoint + conf * detail, envMin, envMax);
@@ -516,7 +519,8 @@ kernel void merge(texture2d<half, access::sample> a [[texture(0)]],
         half mn = min(y, min(min(n, so), min(e, w)));
         half mx = max(y, max(max(n, so), max(e, w)));
         half amp = clamp(min(mn, half(1.0) - mx) / max(mx, half(1e-4)), half(0.0), half(1.0));
-        half k = -half(weights.z) * sqrt(amp);
+        half casGain = adaptiveCAS ? half(1.45) * (half(1.0) - half(0.65) * motionConf) : half(1.0);
+        half k = -half(weights.z) * casGain * sqrt(amp);
         half sharpY = clamp((y + k * (n + so + e + w)) / (half(1.0) + half(4.0) * k), mn, mx);
         color = saturate(color + half3(sharpY - y));
     }
@@ -588,6 +592,7 @@ kernel void mergeNV12Out(texture2d<half, access::sample> a [[texture(0)]],
     half tHalf = half(weights.x);
     bool hudDehalo = (qualityFlags & 4u) != 0u;
     bool iconEnvelope = (qualityFlags & 16u) != 0u;
+    bool adaptiveCAS = (qualityFlags & 32u) != 0u;
     half iconRelease = (iconEnvelope && lowStatic)
         ? iconEnvelopeRelease(lowA, lowAChroma, lowB, lowBChroma, lowMid, lowMidChroma, uvCenter)
         : half(0.0);
@@ -828,7 +833,9 @@ kernel void mergeNV12Out(texture2d<half, access::sample> a [[texture(0)]],
                 half mn = min(y, min(min(n, so), min(e, w)));
                 half mx = max(y, max(max(n, so), max(e, w)));
                 half amp = clamp(min(mn, half(1.0) - mx) / max(mx, half(1e-4)), half(0.0), half(1.0));
-                half kCas = -half(weights.z) * sqrt(amp);
+                half motionConf = applyMotion ? conf : half(0.0);
+                half casGain = adaptiveCAS ? half(1.45) * (half(1.0) - half(0.65) * motionConf) : half(1.0);
+                half kCas = -half(weights.z) * casGain * sqrt(amp);
                 y = clamp((y + kCas * (n + so + e + w)) / (half(1.0) + half(4.0) * kCas), mn, mx);
             }
             half yRaw = lumaToNV12Y(mix(y, alignedY, alignedWeight));

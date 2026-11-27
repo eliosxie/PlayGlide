@@ -70,12 +70,14 @@ final class PreviewImageRenderer {
         var primary: SourceUniforms
         var original: SourceUniforms
         var split: SIMD4<Float>
+        var post: SIMD4<Float>
     }
     private struct HybridPreviewUniforms {
         var primary: SourceUniforms
         var split: SIMD4<Float>
         var offsets: SIMD4<Float>
         var weights: SIMD4<Float>
+        var post: SIMD4<Float>
     }
     private struct HybridPipelineKey: Hashable {
         let format: UInt
@@ -111,6 +113,17 @@ final class PreviewImageRenderer {
     /// (`PLAYGLIDE_PREWARM_PIPELINES=0` opts out for cold-start A/B comparison).
     static var prewarmPipelinesEnabled: Bool {
         ProcessInfo.processInfo.environment["PLAYGLIDE_PREWARM_PIPELINES"] != "0"
+    }
+    /// Optional 5-tap overshoot-clamped RCAS applied symmetrically to original and midpoint frames
+    /// (`PLAYGLIDE_GLOBAL_RCAS=0.0..1.0`; unset or `0` disables).
+    static var globalRCASStrength: Float {
+        guard
+            let raw = ProcessInfo.processInfo.environment["PLAYGLIDE_GLOBAL_RCAS"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !raw.isEmpty,
+            let value = Float(raw), value.isFinite, value > 0
+        else { return 0 }
+        return min(1, value)
     }
 
     private let device: any MTLDevice
@@ -153,6 +166,8 @@ final class PreviewImageRenderer {
     var spatialMovingDetailOverride: Bool?
     var iconEnvelopeOverride: Bool?
     var hudDehaloOverride: Bool?
+    var adaptiveCASOverride: Bool?
+    var globalRCASOverride: Float?
     /// The frame whose MetalFX output is still in the upscaler's output texture.
     private var spatialKey: Key?
     private var reusedSpatialOutput = false
@@ -438,7 +453,8 @@ final class PreviewImageRenderer {
                     chromaOffset: rawVideo.chromaOffset)
                 try drawPass(
                     pipeline: inputPipeline, primary: fullSource, original: nil, compare: false, pqOutput: false,
-                    suppressDither: spatialPrecision != .unorm8, to: resources.input, command: command)
+                    suppressDither: spatialPrecision != .unorm8, suppressPostProcess: true,
+                    to: resources.input, command: command)
                 resources.scaler.encode(commandBuffer: command)
                 spatialKey = spatialNext
                 spatialUpscales += 1
@@ -622,7 +638,8 @@ final class PreviewImageRenderer {
 
     private func drawPass(
         pipeline: any MTLRenderPipelineState, primary: MetalSource, original: MetalSource?, compare: Bool,
-        pqOutput: Bool, suppressDither: Bool = false, to destination: any MTLTexture, command: any MTLCommandBuffer
+        pqOutput: Bool, suppressDither: Bool = false, suppressPostProcess: Bool = false,
+        to destination: any MTLTexture, command: any MTLCommandBuffer
     ) throws {
         let descriptor = MTLRenderPassDescriptor()
         descriptor.colorAttachments[0].texture = destination
@@ -651,9 +668,11 @@ final class PreviewImageRenderer {
         } else {
             ditherScale = 0
         }
+        let rcasStrength = suppressPostProcess ? 0 : min(1, max(0, globalRCASOverride ?? Self.globalRCASStrength))
         var uniforms = PreviewUniforms(
             primary: primaryUniforms, original: originalUniforms,
-            split: SIMD4<Float>(compare ? 1 : 0, floor(Float(destination.width) * 0.5), ditherScale, 0))
+            split: SIMD4<Float>(compare ? 1 : 0, floor(Float(destination.width) * 0.5), ditherScale, 0),
+            post: SIMD4<Float>(rcasStrength, 0, 0, 0))
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(primary.primary, index: 0)
         encoder.setFragmentTexture(primary.chroma ?? primary.primary, index: 1)
@@ -708,7 +727,7 @@ final class PreviewImageRenderer {
                 try encodeDeferredHybrid(
                     frame, recipe: recipe, compare: false, pqOutput: false, to: resources.input,
                     size: recipe.inputSize, ignoreContentRect: true, suppressDither: spatialPrecision != .unorm8,
-                    command: command)
+                    suppressPostProcess: true, command: command)
             else { return false }
             resources.scaler.encode(commandBuffer: command)
             spatialKey = spatialNext
@@ -737,7 +756,7 @@ final class PreviewImageRenderer {
     private func encodeDeferredHybrid(
         _ frame: PresentationFrame, recipe: HybridPreviewRecipe, compare: Bool, pqOutput: Bool,
         to destination: any MTLTexture, size: VideoSize, ignoreContentRect: Bool = false,
-        suppressDither: Bool = false, command: any MTLCommandBuffer
+        suppressDither: Bool = false, suppressPostProcess: Bool = false, command: any MTLCommandBuffer
     ) throws -> Bool {
         guard let textureCache else { return false }
         let contentRect = ignoreContentRect ? nil : frame.video.contentRect
@@ -896,9 +915,11 @@ final class PreviewImageRenderer {
             (spatialMovingDetailOverride ?? HybridInterpolator.spatialMovingDetailEnabled) && frame.spatial
         let iconEnvelope = iconEnvelopeOverride ?? HybridInterpolator.iconEnvelopeEnabled
         let hudDehalo = hudDehaloOverride ?? HybridInterpolator.hudDehaloEnabled
+        let adaptiveCAS = adaptiveCASOverride ?? HybridInterpolator.adaptiveCASEnabled
+        let rcasStrength = suppressPostProcess ? 0 : min(1, max(0, globalRCASOverride ?? Self.globalRCASStrength))
         let qualityFlags =
             (Self.hybridEdgeRefineEnabled ? 1 : 0) | (hudDehalo ? 4 : 0)
-            | (stabilizesSpatialDetail ? 8 : 0) | (iconEnvelope ? 16 : 0)
+            | (stabilizesSpatialDetail ? 8 : 0) | (iconEnvelope ? 16 : 0) | (adaptiveCAS ? 32 : 0)
         var uniforms = HybridPreviewUniforms(
             primary: primaryUniforms,
             split: SIMD4<Float>(
@@ -907,7 +928,8 @@ final class PreviewImageRenderer {
             offsets: SIMD4<Float>(srcA.chromaOffset.x, srcA.chromaOffset.y, srcB.chromaOffset.x, srcB.chromaOffset.y),
             weights: SIMD4<Float>(
                 recipe.phase, recipe.restoresStaticPixels ? 1 : 0, recipe.sharpenStrength,
-                Float(qualityFlags)))
+                Float(qualityFlags)),
+            post: SIMD4<Float>(rcasStrength, 0, 0, 0))
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(srcA.primary, index: 0)
         encoder.setFragmentTexture(aChroma, index: 1)
@@ -1098,12 +1120,14 @@ final class PreviewImageRenderer {
             SourceUniforms primary;
             SourceUniforms original;
             float4 split;
+            float4 post;
         };
         struct HybridPreviewUniforms {
             SourceUniforms primary;
             float4 split;
             float4 offsets;
             float4 weights;
+            float4 post;
         };
         constant bool previewHasMotion [[function_constant(0)]];
         constant bool previewHasForwardMotion [[function_constant(1)]];
@@ -1248,6 +1272,37 @@ final class PreviewImageRenderer {
             float n1 = fract(52.9829189f * fract(dot(px + float2(17.0f, 31.0f), float2(0.06711056f, 0.00583715f))));
             return half((n0 - n1) * 0.5f);
         }
+        // 5-tap overshoot-clamped RCAS with high-contrast static-text guard (zero ringing, zero white halos).
+        inline half previewRCASLuma(half3 rgb, bool bt2020) {
+            return bt2020 ? dot(rgb, half3(0.2627, 0.6780, 0.0593))
+                          : dot(rgb, half3(0.2126, 0.7152, 0.0722));
+        }
+        inline half3 previewApplyRCAS(half3 c, half3 n, half3 s, half3 e, half3 w, half strength, bool bt2020) {
+            half lC = previewRCASLuma(c, bt2020);
+            half lN = previewRCASLuma(n, bt2020);
+            half lS = previewRCASLuma(s, bt2020);
+            half lE = previewRCASLuma(e, bt2020);
+            half lW = previewRCASLuma(w, bt2020);
+            half lMin = min(lC, min(min(lN, lS), min(lE, lW)));
+            half lMax = max(lC, max(max(lN, lS), max(lE, lW)));
+            half contrast = lMax - lMin;
+            half textGuard = half(1.0) - smoothstep(half(0.55), half(0.75), contrast);
+            half amp = clamp(min(lMin, half(1.0) - lMax) / max(lMax, half(1e-4)), half(0.0), half(1.0));
+            half lobe = -half(0.1875) * strength * sqrt(amp) * textGuard;
+            half3 out = (c + lobe * (n + s + e + w)) / (half(1.0) + half(4.0) * lobe);
+            half3 rgbMin = min(c, min(min(n, s), min(e, w)));
+            half3 rgbMax = max(c, max(max(n, s), max(e, w)));
+            return clamp(out, rgbMin, rgbMax);
+        }
+        inline half previewApplyLumaRCAS(half c, half n, half s, half e, half w, half strength) {
+            half lMin = min(c, min(min(n, s), min(e, w)));
+            half lMax = max(c, max(max(n, s), max(e, w)));
+            half contrast = lMax - lMin;
+            half textGuard = half(1.0) - smoothstep(half(0.55), half(0.75), contrast);
+            half amp = clamp(min(lMin, half(1.0) - lMax) / max(lMax, half(1e-4)), half(0.0), half(1.0));
+            half lobe = -half(0.1875) * strength * sqrt(amp) * textGuard;
+            return clamp((c + lobe * (n + s + e + w)) / (half(1.0) + half(4.0) * lobe), lMin, lMax);
+        }
         fragment half4 previewFragment(
             PreviewVertex in [[stage_in]],
             texture2d<half, access::sample> primaryTex [[texture(0)]],
@@ -1257,11 +1312,28 @@ final class PreviewImageRenderer {
             constant PreviewUniforms &uniforms [[buffer(0)]]
         ) {
             float2 px = in.position.xy;
-            half3 rgb;
-            if (uniforms.split.x > 0.5f && px.x < uniforms.split.y) {
-                rgb = sampleSource(originalTex, originalChroma, uniforms.original, px);
-            } else {
-                rgb = sampleSource(primaryTex, primaryChroma, uniforms.primary, px);
+            bool useOriginal = uniforms.split.x > 0.5f && px.x < uniforms.split.y;
+            SourceUniforms activeSrc = useOriginal ? uniforms.original : uniforms.primary;
+            half3 rgb = useOriginal
+                ? sampleSource(originalTex, originalChroma, activeSrc, px)
+                : sampleSource(primaryTex, primaryChroma, activeSrc, px);
+            if (uniforms.post.x > 0.001f
+                && px.x >= activeSrc.fitRect.x && px.x < activeSrc.fitMax.x
+                && px.y >= activeSrc.fitRect.y && px.y < activeSrc.fitMax.y) {
+                half3 n = useOriginal
+                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(0.0f, -1.0f))
+                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(0.0f, -1.0f));
+                half3 s = useOriginal
+                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(0.0f, 1.0f))
+                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(0.0f, 1.0f));
+                half3 e = useOriginal
+                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(1.0f, 0.0f))
+                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(1.0f, 0.0f));
+                half3 w = useOriginal
+                    ? sampleSource(originalTex, originalChroma, activeSrc, px + float2(-1.0f, 0.0f))
+                    : sampleSource(primaryTex, primaryChroma, activeSrc, px + float2(-1.0f, 0.0f));
+                bool bt2020 = activeSrc.flags.x > 1.5f;
+                rgb = previewApplyRCAS(rgb, n, s, e, w, half(uniforms.post.x), bt2020);
             }
             if (uniforms.split.z > 0.0f) {
                 rgb = saturate(rgb + half3(triangularDither(px) * half(uniforms.split.z)));
@@ -1667,6 +1739,13 @@ final class PreviewImageRenderer {
             }
             if (u.split.x > 0.5f && px.x < u.split.y) {
                 half3 orig = sampleSource(aTex, aChroma, src, px);
+                if (u.post.x > 0.001f) {
+                    half3 n = sampleSource(aTex, aChroma, src, px + float2(0.0f, -1.0f));
+                    half3 s = sampleSource(aTex, aChroma, src, px + float2(0.0f, 1.0f));
+                    half3 e = sampleSource(aTex, aChroma, src, px + float2(1.0f, 0.0f));
+                    half3 w = sampleSource(aTex, aChroma, src, px + float2(-1.0f, 0.0f));
+                    orig = previewApplyRCAS(orig, n, s, e, w, half(u.post.x), src.flags.x > 1.5f);
+                }
                 if (u.split.z > 0.0f) {
                     orig = saturate(orig + half3(triangularDither(px) * half(u.split.z)));
                 }
@@ -1695,6 +1774,9 @@ final class PreviewImageRenderer {
             bool hudDehalo = (qualityFlags & 4u) != 0u;
             bool spatialMovingDetail = (qualityFlags & 8u) != 0u && previewHasMotion;
             bool iconEnvelope = (qualityFlags & 16u) != 0u;
+            bool adaptiveCAS = (qualityFlags & 32u) != 0u;
+            half rcasStrength = half(u.post.x);
+            float2 pxUVStep = src.fitRect.zw * src.uvRect.zw;
             half pairedConfidence = spatialMovingDetail
                 ? smoothstep(half(0.05), half(0.45), min(md.z, md.w)) : half(0.0);
             bool windowAA = u.split.w > 0.5f && src.fitMax.z > 0.0f;
@@ -1724,7 +1806,26 @@ final class PreviewImageRenderer {
                         lowATex, lowAChroma, lowBTex, lowBChroma, lowMidTex, lowMidChroma, uv);
                 }
                 if (staticW >= half(0.999) && pairedConfidence == half(0.0)) {
-                    half yStatic = previewNv12Luma(mix(yA, yB, tHalf));
+                    half yStatic = saturate(previewNv12Luma(mix(yA, yB, tHalf)));
+                    if (rcasStrength > half(0.001)) {
+                        half yN = saturate(previewNv12Luma(mix(
+                            aTex.sample(previewSampler, clamp(uv + float2(0.0f, -pxUVStep.y), src.clampRect.xy, src.clampRect.zw)).r,
+                            bTex.sample(previewSampler, clamp(uv + float2(0.0f, -pxUVStep.y), src.clampRect.xy, src.clampRect.zw)).r,
+                            tHalf)));
+                        half yS = saturate(previewNv12Luma(mix(
+                            aTex.sample(previewSampler, clamp(uv + float2(0.0f, pxUVStep.y), src.clampRect.xy, src.clampRect.zw)).r,
+                            bTex.sample(previewSampler, clamp(uv + float2(0.0f, pxUVStep.y), src.clampRect.xy, src.clampRect.zw)).r,
+                            tHalf)));
+                        half yE = saturate(previewNv12Luma(mix(
+                            aTex.sample(previewSampler, clamp(uv + float2(pxUVStep.x, 0.0f), src.clampRect.xy, src.clampRect.zw)).r,
+                            bTex.sample(previewSampler, clamp(uv + float2(pxUVStep.x, 0.0f), src.clampRect.xy, src.clampRect.zw)).r,
+                            tHalf)));
+                        half yW = saturate(previewNv12Luma(mix(
+                            aTex.sample(previewSampler, clamp(uv + float2(-pxUVStep.x, 0.0f), src.clampRect.xy, src.clampRect.zw)).r,
+                            bTex.sample(previewSampler, clamp(uv + float2(-pxUVStep.x, 0.0f), src.clampRect.xy, src.clampRect.zw)).r,
+                            tHalf)));
+                        yStatic = previewApplyLumaRCAS(yStatic, yN, yS, yE, yW, rcasStrength);
+                    }
                     half2 cbcrStatic = fma(mix(caUV, cbUV, tHalf), half(255.0 / 224.0), half(-128.0 / 224.0));
                     half3 rgb = finalizePreviewColor(decodeYCbCr(yStatic, cbcrStatic, bt2020, softToe), colorMode);
                     if (u.split.z > 0.0f) rgb = saturate(rgb + half3(triangularDither(px) * half(u.split.z)));
@@ -1752,6 +1853,9 @@ final class PreviewImageRenderer {
             half alignedWeight = half(0.0);
             half2 outChroma = midUV;
             bool appliedMotion = false;
+            half motionConf = half(0.0);
+            float2 motionUV = uv;
+            bool motionRefIsB = false;
             if (previewHasMotion && detailScale > half(0.01)) {
                 if (edgeRefine && (!spatialMovingDetail || pairedConfidence == half(0.0))) {
                     float2 mdSize = float2(motionDetail.get_width(), motionDetail.get_height());
@@ -1795,6 +1899,9 @@ final class PreviewImageRenderer {
                     half wb = half(t) * wB;
                     half invWAB = half(1.0) / max(wa + wb, half(1e-4));
                     half conf = max(wA, wB) * detailScale;
+                    motionConf = conf;
+                    motionRefIsB = wb > wa;
+                    motionUV = motionRefIsB ? uvB : uvA;
                     half srcAY = midY, srcBY = midY;
                     half baseAY = midY, baseBY = midY;
                     half hiAY = half(0.0), hiBY = half(0.0);
@@ -1869,7 +1976,8 @@ final class PreviewImageRenderer {
                     }
                 }
             }
-            half casStrength = half(u.weights.z) * detailScale;
+            half casGain = adaptiveCAS ? half(1.45) * (half(1.0) - half(0.65) * motionConf) : half(1.0);
+            half casStrength = half(u.weights.z) * casGain * detailScale;
             if (casStrength > half(0.001)) {
                 float2 casStep = 0.75f / float2(lowMidTex.get_width(), lowMidTex.get_height());
                 half n = saturate(previewNv12Luma(lowMidTex.sample(previewSampler, uv + float2(0.0f, -casStep.y)).r));
@@ -1888,6 +1996,44 @@ final class PreviewImageRenderer {
             if (staticW > half(0.001)) {
                 y = mix(y, saturate(previewNv12Luma(mix(yA, yB, tHalf))), staticW);
                 outChroma = mix(outChroma, mix(caUV, cbUV, tHalf), staticW);
+            }
+            if (rcasStrength > half(0.001)) {
+                half rC, rN, rS, rE, rW;
+                if (staticW > half(0.5)) {
+                    rC = saturate(previewNv12Luma(mix(yA, yB, tHalf)));
+                    rN = saturate(previewNv12Luma(mix(
+                        aTex.sample(previewSampler, clamp(uv + float2(0.0f, -pxUVStep.y), src.clampRect.xy, src.clampRect.zw)).r,
+                        bTex.sample(previewSampler, clamp(uv + float2(0.0f, -pxUVStep.y), src.clampRect.xy, src.clampRect.zw)).r,
+                        tHalf)));
+                    rS = saturate(previewNv12Luma(mix(
+                        aTex.sample(previewSampler, clamp(uv + float2(0.0f, pxUVStep.y), src.clampRect.xy, src.clampRect.zw)).r,
+                        bTex.sample(previewSampler, clamp(uv + float2(0.0f, pxUVStep.y), src.clampRect.xy, src.clampRect.zw)).r,
+                        tHalf)));
+                    rE = saturate(previewNv12Luma(mix(
+                        aTex.sample(previewSampler, clamp(uv + float2(pxUVStep.x, 0.0f), src.clampRect.xy, src.clampRect.zw)).r,
+                        bTex.sample(previewSampler, clamp(uv + float2(pxUVStep.x, 0.0f), src.clampRect.xy, src.clampRect.zw)).r,
+                        tHalf)));
+                    rW = saturate(previewNv12Luma(mix(
+                        aTex.sample(previewSampler, clamp(uv + float2(-pxUVStep.x, 0.0f), src.clampRect.xy, src.clampRect.zw)).r,
+                        bTex.sample(previewSampler, clamp(uv + float2(-pxUVStep.x, 0.0f), src.clampRect.xy, src.clampRect.zw)).r,
+                        tHalf)));
+                } else if (appliedMotion && motionConf > half(0.25)) {
+                    texture2d<half, access::sample> refTex = motionRefIsB ? bTex : aTex;
+                    rC = saturate(previewNv12Luma(refTex.sample(previewSampler, motionUV).r));
+                    rN = saturate(previewNv12Luma(refTex.sample(previewSampler, motionUV + float2(0.0f, -pxUVStep.y)).r));
+                    rS = saturate(previewNv12Luma(refTex.sample(previewSampler, motionUV + float2(0.0f, pxUVStep.y)).r));
+                    rE = saturate(previewNv12Luma(refTex.sample(previewSampler, motionUV + float2(pxUVStep.x, 0.0f)).r));
+                    rW = saturate(previewNv12Luma(refTex.sample(previewSampler, motionUV + float2(-pxUVStep.x, 0.0f)).r));
+                } else {
+                    rC = saturate(previewNv12Luma(lowMidTex.sample(previewSampler, uv).r));
+                    rN = saturate(previewNv12Luma(lowMidTex.sample(previewSampler, uv + float2(0.0f, -pxUVStep.y)).r));
+                    rS = saturate(previewNv12Luma(lowMidTex.sample(previewSampler, uv + float2(0.0f, pxUVStep.y)).r));
+                    rE = saturate(previewNv12Luma(lowMidTex.sample(previewSampler, uv + float2(pxUVStep.x, 0.0f)).r));
+                    rW = saturate(previewNv12Luma(lowMidTex.sample(previewSampler, uv + float2(-pxUVStep.x, 0.0f)).r));
+                }
+                y = previewApplyLumaRCAS(
+                    y, saturate(y + (rN - rC)), saturate(y + (rS - rC)),
+                    saturate(y + (rE - rC)), saturate(y + (rW - rC)), rcasStrength);
             }
             half2 cbcr = fma(outChroma, half(255.0 / 224.0), half(-128.0 / 224.0));
             half3 rgb = finalizePreviewColor(decodeYCbCr(y, cbcr, bt2020, softToe), colorMode);
