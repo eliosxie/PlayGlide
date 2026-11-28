@@ -32,6 +32,7 @@ struct SessionDraft: Sendable, Equatable {
     var upscaling: UpscalingStrategy = .off
     var outputPreset: OutputPreset = .double
     var presentationMode: PresentationMode = .responsive
+    var powerPreference: InterpolationPowerPreference = .lowLatency
 
     var isAvailableInBuild: Bool {
         BuildFeatures.developmentTools
@@ -120,6 +121,7 @@ struct SessionPreferences: Sendable, Equatable, Codable {
     var upscaling: UpscalingStrategy = .off
     var outputPreset: OutputPreset = .double
     var presentationMode: PresentationMode = .responsive
+    var powerPreference: InterpolationPowerPreference = .lowLatency
     var audioControls = AudioPlaybackControls()
 
     init() {}
@@ -141,6 +143,7 @@ struct SessionPreferences: Sendable, Equatable, Codable {
         upscaling = draft.upscaling
         outputPreset = draft.outputPreset
         presentationMode = draft.presentationMode
+        powerPreference = draft.powerPreference
         self.audioControls = AudioPlaybackControls(
             volume: audioControls.clampedVolume,
             muted: audioControls.muted,
@@ -169,6 +172,8 @@ struct SessionPreferences: Sendable, Equatable, Codable {
         outputPreset = try container.decodeIfPresent(OutputPreset.self, forKey: .outputPreset) ?? .double
         presentationMode =
             try container.decodeIfPresent(PresentationMode.self, forKey: .presentationMode) ?? .responsive
+        powerPreference =
+            try container.decodeIfPresent(InterpolationPowerPreference.self, forKey: .powerPreference) ?? .lowLatency
         audioControls =
             try container.decodeIfPresent(AudioPlaybackControls.self, forKey: .audioControls)
             ?? AudioPlaybackControls()
@@ -190,6 +195,7 @@ struct SessionPreferences: Sendable, Equatable, Codable {
         draft.upscaling = upscaling
         draft.outputPreset = outputPreset
         draft.presentationMode = presentationMode
+        draft.powerPreference = powerPreference
     }
 
     static func load(from defaults: UserDefaults) -> Self? {
@@ -230,6 +236,18 @@ enum PresentationMode: String, CaseIterable, Identifiable, Sendable, Codable {
         let output = outputInterval.isFinite && outputInterval > 0 ? Float(1 / outputInterval) : 60
         return min(maximum, output)
     }
+}
+
+enum InterpolationPowerPreference: String, CaseIterable, Identifiable, Sendable, Codable {
+    case lowLatency, powerSaving
+    var id: Self { self }
+    var title: AppText {
+        switch self {
+        case .lowLatency: AppText("低延迟优先（保持性能状态）", "Low Latency (Performance Hold)")
+        case .powerSaving: AppText("省电优先（关闭帧间忙等）", "Power Saving (No Idle Spin)")
+        }
+    }
+    var allowsPerformanceHold: Bool { self == .lowLatency }
 }
 
 struct PreviewDisplayTiming: Sendable {

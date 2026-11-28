@@ -297,6 +297,7 @@ final class WorkspaceModel: ObservableObject {
 
             \(language.text("后端：", "Engine: "))\(statistics.backend.localized(in: language))
             \(language.text("呈现策略：", "Presentation mode: "))\((applied ?? draft).presentationMode.title.localized(in: language))
+            \(language.text("能耗偏好：", "Power preference: "))\((applied ?? draft).powerPreference.title.localized(in: language))
             \(language.text("输出尺寸：", "Output size: "))\(statistics.outputSize?.description ?? "—")
             \(language.text("采集 / 内容 / 生成 / 呈现：", "Capture / content / generated / presented: "))\(String(format: "%.1f / %.1f / %.1f / %.1f fps", inputFPS, contentFPS, generatedFPS, presentedFPS))
             \(language.text("处理 p50 / p95：", "Processing p50 / p95: "))\(String(format: "%.1f / %.1f ms", statistics.p50, statistics.p95))

@@ -14,8 +14,12 @@ final class PerformanceHold: Sendable {
     static let isEnabledByEnvironment = ProcessInfo.processInfo.environment["PLAYGLIDE_PERFORMANCE_HOLD"] != "0"
 
     /// Interpolated capture-card and test-pattern sessions; window capture is untested.
-    static func applies(to settings: SessionDraft) -> Bool {
-        isEnabledByEnvironment && settings.interpolation != .off && settings.source != .window
+    /// `PLAYGLIDE_PERFORMANCE_HOLD=0` always disables the hold; otherwise `settings.powerPreference` controls it.
+    static func applies(
+        to settings: SessionDraft, environmentEnabled: Bool = PerformanceHold.isEnabledByEnvironment
+    ) -> Bool {
+        environmentEnabled && settings.powerPreference.allowsPerformanceHold
+            && settings.interpolation != .off && settings.source != .window
     }
 
     /// Covers one content gap, ending soon after input stalls.

@@ -275,6 +275,20 @@ struct SessionInspector: View {
                         )
                         .font(.caption).foregroundStyle(.secondary)
                     }
+                    if model.draft.interpolation != .off && model.draft.source != .window {
+                        Picker(language.text("能耗偏好", "Power Preference"), selection: $model.draft.powerPreference) {
+                            ForEach(InterpolationPowerPreference.allCases) {
+                                Text($0.title.localized(in: language)).tag($0)
+                            }
+                        }
+                        Text(
+                            language.text(
+                                "低延迟优先在补帧间隙保持芯片性能状态以压低尾延迟；省电优先停用帧间忙等以降低整机功耗与发热。",
+                                "Low Latency holds SoC performance state between interpolated pairs to reduce tail latency. Power Saving disables inter-frame spinning to reduce power and heat."
+                            )
+                        )
+                        .font(.caption).foregroundStyle(.secondary)
+                    }
                     if BuildFeatures.developmentTools {
                         Text(
                             language.text(
