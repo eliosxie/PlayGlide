@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct SessionInspector: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var model: WorkspaceModel
     let language: AppLanguage
     @State private var audioDetailsExpanded = false
@@ -42,14 +43,14 @@ struct SessionInspector: View {
             .scrollIndicators(.hidden)
 
             Rectangle()
-                .fill(Color.white.opacity(0.07))
+                .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
 
             footerBar
                 .padding(14)
-                .background(Color.black.opacity(0.2))
+                .background(Color.black.opacity(colorScheme == .light ? 0.035 : 0.2))
         }
-        .tint(.mint)
+        .tint(colorScheme.workspaceAccent)
         .onChange(of: model.availableUpscalingTargets, initial: true) { _, _ in
             model.updateUpscalingTarget()
         }
@@ -112,15 +113,15 @@ struct SessionInspector: View {
                         } label: {
                             Image(systemName: "arrow.clockwise")
                                 .font(.caption.weight(.semibold))
-                                .foregroundStyle(.white.opacity(0.8))
+                                .foregroundStyle(.primary.opacity(0.8))
                                 .frame(width: 28, height: 28)
                                 .background(
-                                    Color.white.opacity(0.06),
+                                    Color.primary.opacity(0.06),
                                     in: RoundedRectangle(cornerRadius: 7, style: .continuous)
                                 )
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
+                                        .strokeBorder(Color.primary.opacity(0.09), lineWidth: 1)
                                 )
                         }
                         .buttonStyle(.plain)
@@ -188,16 +189,16 @@ struct SessionInspector: View {
                                 : language.text("选择窗口", "Choose")
                         )
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.9))
+                        .foregroundStyle(.primary.opacity(0.9))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(
-                            Color.white.opacity(0.08),
+                            Color.primary.opacity(0.08),
                             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
@@ -307,7 +308,7 @@ struct SessionInspector: View {
             let targets = model.availableUpscalingTargets
             if !targets.isEmpty {
                 Rectangle()
-                    .fill(Color.white.opacity(0.06))
+                    .fill(Color.primary.opacity(0.06))
                     .frame(height: 1)
                 HStack {
                     Text(language.text("MetalFX 超分", "MetalFX Upscaling"))
@@ -412,12 +413,11 @@ struct SessionInspector: View {
                         model.toggleAudioMute()
                     } label: {
                         Image(systemName: model.audioControls.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                            .foregroundStyle(model.audioControls.muted ? Color.secondary : Color.mint)
+                            .foregroundStyle(model.audioControls.muted ? Color.secondary : colorScheme.workspaceAccent)
                             .frame(width: 20)
                     }
                     .buttonStyle(.plain)
                     Slider(value: $model.audioControls.volume, in: 0...1)
-                        .tint(.mint)
                         .disabled(model.audioControls.muted)
                     Text("\(Int((model.audioControls.clampedVolume * 100).rounded()))%")
                         .font(.caption.monospacedDigit())
@@ -454,7 +454,7 @@ struct SessionInspector: View {
                                     Button(language.text("归零", "Reset")) { model.resetAudioOffset() }
                                         .buttonStyle(.plain)
                                         .font(.caption.weight(.medium))
-                                        .foregroundStyle(.mint)
+                                        .foregroundStyle(colorScheme.workspaceAccent)
                                 }
                             }
                             Slider(
@@ -464,7 +464,6 @@ struct SessionInspector: View {
                                     .maxOffsetMilliseconds,
                                 step: 5
                             )
-                            .tint(.mint)
                         }
                     }
                     .padding(.top, 8)
@@ -537,7 +536,7 @@ struct SessionInspector: View {
 
                     if BuildFeatures.developerUI {
                         Rectangle()
-                            .fill(Color.white.opacity(0.06))
+                            .fill(Color.primary.opacity(0.06))
                             .frame(height: 1)
                         InspectorField(language.text("开发者处理器", "Developer Engine")) {
                             StudioMenuButton(
@@ -564,10 +563,10 @@ struct SessionInspector: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
-        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
         )
     }
 
@@ -595,6 +594,11 @@ struct SessionInspector: View {
             } label: {
                 let isRunning = model.active
                 let isDisabled = model.state == .stopping || (!isRunning && !model.canStart)
+                let startColor: Color = colorScheme == .light ? .white : .black
+                let stopColor =
+                    colorScheme == .light
+                    ? Color(red: 0.67, green: 0.16, blue: 0.2)
+                    : Color(red: 1.0, green: 0.45, blue: 0.46)
                 let startTitle =
                     model.draft.source == .window
                     ? language.text("开始采集", "Start Capture")
@@ -605,23 +609,21 @@ struct SessionInspector: View {
                 )
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(
-                    isDisabled
-                        ? Color.white.opacity(0.38)
-                        : (isRunning ? Color(red: 1.0, green: 0.45, blue: 0.46) : .black)
+                    isDisabled ? Color.primary.opacity(0.38) : (isRunning ? stopColor : startColor)
                 )
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 9)
                 .background(
                     isDisabled
-                        ? Color.white.opacity(0.06)
-                        : (isRunning ? Color.red.opacity(0.14) : Color.mint),
+                        ? Color.primary.opacity(0.06)
+                        : (isRunning ? Color.red.opacity(0.14) : colorScheme.workspaceAccent),
                     in: RoundedRectangle(cornerRadius: 9, style: .continuous)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .strokeBorder(
                             isDisabled
-                                ? Color.white.opacity(0.09)
+                                ? Color.primary.opacity(0.09)
                                 : (isRunning ? Color.red.opacity(0.32) : Color.clear),
                             lineWidth: 1)
                 )
@@ -633,6 +635,7 @@ struct SessionInspector: View {
 }
 
 private struct StudioSegmentedControl<Value: Hashable>: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Binding var selection: Value
     let options: [(value: Value, title: String)]
 
@@ -647,19 +650,20 @@ private struct StudioSegmentedControl<Value: Hashable>: View {
                 } label: {
                     Text(item.title)
                         .font(.caption.weight(isSelected ? .semibold : .medium))
-                        .foregroundStyle(isSelected ? .white : .white.opacity(0.62))
+                        .foregroundStyle(isSelected ? Color.primary : Color.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
                         .padding(.horizontal, 6)
                         .background(
-                            isSelected ? Color.mint.opacity(0.22) : Color.clear,
+                            isSelected ? colorScheme.workspaceAccent.opacity(0.22) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 6, style: .continuous)
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .strokeBorder(isSelected ? Color.mint.opacity(0.45) : Color.clear, lineWidth: 1)
+                                .strokeBorder(
+                                    isSelected ? colorScheme.workspaceAccent.opacity(0.45) : Color.clear, lineWidth: 1)
                         )
                         .contentShape(Rectangle())
                 }
@@ -667,10 +671,13 @@ private struct StudioSegmentedControl<Value: Hashable>: View {
             }
         }
         .padding(2)
-        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(
+            Color.black.opacity(colorScheme == .light ? 0.05 : 0.28),
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.07), lineWidth: 1)
+                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
         )
     }
 }
@@ -698,21 +705,21 @@ private struct StudioMenuButton: View {
             HStack(spacing: 6) {
                 Text(title)
                     .font(.callout)
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(.primary.opacity(0.9))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.45))
+                    .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 10)
             .frame(height: 28)
             .frame(maxWidth: .infinity)
-            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
+                    .strokeBorder(Color.primary.opacity(0.09), lineWidth: 1)
             )
             .allowsHitTesting(false)
 
@@ -772,6 +779,7 @@ private struct StudioMenuHitTarget: NSViewRepresentable {
 }
 
 private struct StudioSwitch: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Binding var isOn: Bool
 
     var body: some View {
@@ -782,7 +790,9 @@ private struct StudioSwitch: View {
         } label: {
             ZStack(alignment: isOn ? .trailing : .leading) {
                 Capsule()
-                    .fill(isOn ? Color.mint : Color.white.opacity(0.16))
+                    .fill(
+                        isOn ? colorScheme.workspaceAccent : Color.primary.opacity(colorScheme == .light ? 0.26 : 0.16)
+                    )
                     .frame(width: 34, height: 19)
                 Circle()
                     .fill(.white)
@@ -830,6 +840,7 @@ private struct StudioDisclosureRow<Content: View>: View {
 }
 
 private struct InspectorCard<Trailing: View, Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
     let icon: String
     @ViewBuilder let headerTrailing: () -> Trailing
@@ -852,20 +863,20 @@ private struct InspectorCard<Trailing: View, Content: View>: View {
             HStack(spacing: 7) {
                 Image(systemName: icon)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.mint)
+                    .foregroundStyle(colorScheme.workspaceAccent)
                 Text(title)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.84))
+                    .foregroundStyle(.primary.opacity(0.84))
                 Spacer()
                 headerTrailing()
             }
             content()
         }
         .padding(13)
-        .background(Color.white.opacity(0.042), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Color.primary.opacity(0.042), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.075), lineWidth: 1)
+                .strokeBorder(Color.primary.opacity(0.075), lineWidth: 1)
         )
     }
 }

@@ -3,12 +3,29 @@ import AppKit
 import SwiftUI
 
 struct WorkspaceView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var model: WorkspaceModel
     let language: AppLanguage
     @Binding var languageSelection: AppLanguage
+    @Binding var usesLightAppearance: Bool
 
-    private let studioBackground = Color(red: 0.055, green: 0.06, blue: 0.075)
-    private let inspectorBackground = Color(red: 0.082, green: 0.088, blue: 0.106)
+    private var studioBackground: Color {
+        colorScheme == .light
+            ? Color(red: 0.93, green: 0.95, blue: 0.97)
+            : Color(red: 0.055, green: 0.06, blue: 0.075)
+    }
+
+    private var inspectorBackground: Color {
+        colorScheme == .light
+            ? Color(red: 0.98, green: 0.985, blue: 0.99)
+            : Color(red: 0.082, green: 0.088, blue: 0.106)
+    }
+
+    private var appearanceActionTitle: String {
+        usesLightAppearance
+            ? language.text("切换到深色外观", "Switch to Dark Appearance")
+            : language.text("切换到浅色外观", "Switch to Light Appearance")
+    }
 
     var body: some View {
         ZStack {
@@ -21,7 +38,7 @@ struct WorkspaceView: View {
                     .accessibilityHidden(model.previewOnly)
             }
         }
-        .tint(.mint)
+        .tint(colorScheme.workspaceAccent)
         .background(studioBackground.ignoresSafeArea())
         .overlayPreferenceValue(PreviewBoundsKey.self) { anchor in
             GeometryReader { geometry in
@@ -80,7 +97,7 @@ struct WorkspaceView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             if model.inspectorVisible {
                 Rectangle()
-                    .fill(Color.white.opacity(0.07))
+                    .fill(Color.primary.opacity(0.07))
                     .frame(width: 1)
                 SessionInspector(model: model, language: language)
                     .frame(width: 316)
@@ -120,7 +137,7 @@ struct WorkspaceView: View {
                         model.originalComparison.toggle()
                     } label: {
                         Image(systemName: "rectangle.split.2x1")
-                            .foregroundStyle(model.originalComparison ? Color.mint : Color.primary)
+                            .foregroundStyle(model.originalComparison ? colorScheme.workspaceAccent : Color.primary)
                     }
                     .disabled(!model.active || model.statistics.lastOutputTime == 0)
                     .help(
@@ -160,14 +177,20 @@ struct WorkspaceView: View {
                     .menuIndicator(.hidden)
                     .help(language.text("切换界面语言", "Switch Interface Language"))
                 }
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button(appearanceActionTitle, systemImage: usesLightAppearance ? "moon.fill" : "sun.max.fill") {
+                        usesLightAppearance.toggle()
+                    }
+                    .labelStyle(.iconOnly)
+                    .help(appearanceActionTitle)
+
                     Button {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             model.inspectorVisible.toggle()
                         }
                     } label: {
                         Image(systemName: "sidebar.right")
-                            .foregroundStyle(model.inspectorVisible ? Color.mint : Color.primary)
+                            .foregroundStyle(model.inspectorVisible ? colorScheme.workspaceAccent : Color.primary)
                     }
                     .help(
                         model.inspectorVisible
@@ -196,9 +219,9 @@ struct WorkspaceView: View {
     private var statusDotColor: Color {
         if model.errorMessage != nil || model.signalWarning != nil { return .orange }
         switch model.state {
-        case .running: return model.waitingForInput ? .orange : .mint
+        case .running: return model.waitingForInput ? .orange : colorScheme.workspaceAccent
         case .starting, .stopping: return .yellow
-        case .idle: return Color.white.opacity(0.35)
+        case .idle: return Color.primary.opacity(0.35)
         }
     }
 
@@ -285,7 +308,7 @@ struct WorkspaceView: View {
                 .foregroundStyle(.orange)
             Text(text)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.92))
+                .foregroundStyle(.primary)
                 .lineLimit(2)
                 .textSelection(.enabled)
             if let dismiss {
@@ -294,7 +317,7 @@ struct WorkspaceView: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
             }
@@ -314,10 +337,10 @@ struct WorkspaceView: View {
                 stripChip(size.description)
             }
             if model.effectiveHDR10Active {
-                stripChip("HDR10", tint: .mint)
+                stripChip("HDR10", tint: colorScheme.workspaceAccent)
             }
             if model.applied?.upscaling == .metalFXSpatial {
-                stripChip("MetalFX", tint: .mint)
+                stripChip("MetalFX", tint: colorScheme.workspaceAccent)
             }
             if model.overloaded {
                 Label(
@@ -325,7 +348,7 @@ struct WorkspaceView: View {
                     systemImage: "exclamationmark.circle.fill"
                 )
                 .font(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(colorScheme == .light ? Color(red: 0.56, green: 0.27, blue: 0) : .orange)
                 .lineLimit(1)
             }
             Spacer()
@@ -335,7 +358,7 @@ struct WorkspaceView: View {
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: model.audioControls.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                            .foregroundStyle(model.audioControls.muted ? Color.secondary : Color.mint)
+                            .foregroundStyle(model.audioControls.muted ? Color.secondary : colorScheme.workspaceAccent)
                         Text(
                             model.audioControls.muted
                                 ? language.text("静音", "Muted")
@@ -347,8 +370,8 @@ struct WorkspaceView: View {
                     .foregroundStyle(model.audioControls.muted ? .secondary : .primary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.055), in: Capsule())
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.07), lineWidth: 1))
+                    .background(Color.primary.opacity(0.055), in: Capsule())
+                    .overlay(Capsule().strokeBorder(Color.primary.opacity(0.07), lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .help(language.text("静音或恢复音频（⌥⌘M）", "Mute or Unmute Audio (⌥⌘M)"))
@@ -361,8 +384,8 @@ struct WorkspaceView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.055), in: Capsule())
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.07), lineWidth: 1))
+                    .background(Color.primary.opacity(0.055), in: Capsule())
+                    .overlay(Capsule().strokeBorder(Color.primary.opacity(0.07), lineWidth: 1))
             }
             .buttonStyle(.plain)
             .help(language.text("窗口内最大化画面（双击画面 / ⇧⌘M）", "Expand preview in window (Double-click / ⇧⌘M)"))
@@ -378,12 +401,12 @@ struct WorkspaceView: View {
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
             .background(
-                (tint == .secondary ? Color.white.opacity(0.055) : tint.opacity(0.14)),
+                (tint == .secondary ? Color.primary.opacity(0.055) : tint.opacity(0.14)),
                 in: Capsule()
             )
             .overlay(
                 Capsule().strokeBorder(
-                    tint == .secondary ? Color.white.opacity(0.07) : tint.opacity(0.28),
+                    tint == .secondary ? Color.primary.opacity(0.07) : tint.opacity(0.28),
                     lineWidth: 1)
             )
     }
@@ -408,6 +431,8 @@ private struct PerformanceDiagnosticsView: View {
 }
 
 private struct PreviewPanel: View {
+    @Environment(\.appearsActive) private var appearsActive
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var model: WorkspaceModel
     let language: AppLanguage
 
@@ -513,11 +538,11 @@ private struct PreviewPanel: View {
         .overlay {
             if !model.previewOnly {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
                     .allowsHitTesting(false)
             }
         }
-        .shadow(color: .black.opacity(model.previewOnly ? 0 : 0.4), radius: 18, y: 6)
+        .shadow(color: .black.opacity(model.previewOnly ? 0 : (colorScheme == .light ? 0.14 : 0.4)), radius: 18, y: 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onTapGesture(count: 2) { model.togglePreviewExpansion() }
         .overlay(alignment: .topLeading) {
@@ -540,15 +565,14 @@ private struct PreviewPanel: View {
     private var idleBackdrop: some View {
         ZStack {
             LinearGradient(
-                colors: [
-                    Color(red: 0.04, green: 0.048, blue: 0.065),
-                    Color(red: 0.022, green: 0.025, blue: 0.035),
-                ],
+                colors: colorScheme == .light
+                    ? [Color(red: 0.99, green: 0.995, blue: 1), Color(red: 0.93, green: 0.96, blue: 0.98)]
+                    : [Color(red: 0.04, green: 0.048, blue: 0.065), Color(red: 0.022, green: 0.025, blue: 0.035)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
             RadialGradient(
-                colors: [Color.mint.opacity(0.09), Color.clear],
+                colors: [colorScheme.workspaceAccent.opacity(0.09), Color.clear],
                 center: .center,
                 startRadius: 10,
                 endRadius: 240
@@ -557,37 +581,38 @@ private struct PreviewPanel: View {
                 if model.active {
                     ProgressView()
                         .controlSize(.large)
-                        .tint(.mint)
+                        .tint(colorScheme.workspaceAccent)
                     Text(
                         model.waitingForInput
                             ? language.text("正在等待 HDMI 信号…", "Waiting for HDMI Signal…")
                             : language.text("正在启动画面…", "Starting Preview…")
                     )
                     .font(.title3.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.92))
+                    .foregroundStyle(.primary)
                 } else {
                     let info = idleCopy
                     ZStack {
                         Circle()
-                            .fill(Color.mint.opacity(0.12))
+                            .fill(colorScheme.workspaceAccent.opacity(0.12))
                             .frame(width: 72, height: 72)
-                            .overlay(Circle().strokeBorder(Color.mint.opacity(0.28), lineWidth: 1))
+                            .overlay(Circle().strokeBorder(colorScheme.workspaceAccent.opacity(0.28), lineWidth: 1))
                         Image(systemName: info.icon)
                             .font(.system(size: 28, weight: .medium))
-                            .foregroundStyle(.mint)
+                            .foregroundStyle(colorScheme.workspaceAccent)
                     }
                     VStack(spacing: 6) {
                         Text(info.title)
                             .font(.title3.weight(.semibold))
-                            .foregroundStyle(.white.opacity(0.95))
+                            .foregroundStyle(.primary)
                         Text(info.detail)
                             .font(.callout)
-                            .foregroundStyle(.white.opacity(0.55))
+                            .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .frame(maxWidth: 420)
                     }
                     if let action = info.actionLabel {
                         let actionIcon = model.draft.source == .window && !model.canStart ? "macwindow" : "play.fill"
+                        let actionForeground: Color = colorScheme == .light ? .white : .black
                         Button {
                             if model.draft.source == .window && !model.canStart {
                                 model.chooseWindow()
@@ -601,8 +626,8 @@ private struct PreviewPanel: View {
                                 .padding(.vertical, 8)
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(.mint)
-                        .foregroundStyle(.black)
+                        .tint(colorScheme.workspaceAccent)
+                        .foregroundStyle(appearsActive ? actionForeground : Color.primary)
                         .controlSize(.large)
                         .padding(.top, 4)
                     } else if model.draft.source == .captureCard && model.devices.isEmpty {
@@ -653,6 +678,7 @@ private struct PreviewPanel: View {
         .padding(.horizontal, 12).padding(.vertical, 7)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+        .environment(\.colorScheme, .dark)
         .padding(14)
     }
 
@@ -691,6 +717,7 @@ private struct PreviewPanel: View {
             }
             .buttonStyle(.plain)
         }
+        .environment(\.colorScheme, .dark)
         .padding(14)
     }
 
@@ -701,7 +728,14 @@ private struct PreviewPanel: View {
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(.ultraThinMaterial, in: Capsule())
             .overlay(Capsule().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
+            .environment(\.colorScheme, .dark)
             .frame(maxWidth: .infinity)
+    }
+}
+
+extension ColorScheme {
+    var workspaceAccent: Color {
+        self == .light ? Color(red: 0.01, green: 0.4, blue: 0.34) : .mint
     }
 }
 

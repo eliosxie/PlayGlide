@@ -39,22 +39,26 @@ enum PlayGlideLauncher {
 struct PlayGlideApp: App {
     @StateObject private var workspace = WorkspaceModel(defaults: .standard)
     @AppStorage(AppLanguage.preferenceKey) private var language = AppLanguage.system
+    @AppStorage("com.eliosxie.PlayGlide.lightAppearance") private var usesLightAppearance = false
 
     var body: some Scene {
         let interfaceLanguage = language.resolved
         Window("PlayGlide", id: "workspace") {
-            WorkspaceView(model: workspace, language: interfaceLanguage, languageSelection: $language)
-                .environment(\.locale, language.locale)
-                .preferredColorScheme(.dark)
-                .frame(minWidth: 1000, minHeight: 680)
-                .task {
-                    #if PLAYGLIDE_DEVELOPMENT
-                        if ProcessInfo.processInfo.arguments.contains("--demo-autostart") {
-                            workspace.draft.source = .testPattern
-                            workspace.start()
-                        }
-                    #endif
-                }
+            WorkspaceView(
+                model: workspace, language: interfaceLanguage, languageSelection: $language,
+                usesLightAppearance: $usesLightAppearance
+            )
+            .environment(\.locale, language.locale)
+            .preferredColorScheme(usesLightAppearance ? .light : .dark)
+            .frame(minWidth: 1000, minHeight: 680)
+            .task {
+                #if PLAYGLIDE_DEVELOPMENT
+                    if ProcessInfo.processInfo.arguments.contains("--demo-autostart") {
+                        workspace.draft.source = .testPattern
+                        workspace.start()
+                    }
+                #endif
+            }
         }
         .defaultSize(width: 1360, height: 860)
         .windowStyle(.titleBar)
