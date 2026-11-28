@@ -110,9 +110,16 @@ struct ProcessingPlan: Sendable, Equatable {
 }
 
 actor FrameProcessor: VideoProcessingStage {
-    /// Enable `HybridInterpolator` for even-sized 2× window capture (`PLAYGLIDE_WINDOW_HYBRID=1`).
+    /// Enable `HybridInterpolator` for even-sized 2× window capture (`PLAYGLIDE_WINDOW_HYBRID=0` opts out).
     static var windowHybridEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_WINDOW_HYBRID"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_WINDOW_HYBRID"] != "0"
+    }
+
+    /// Opt-in 60→120 (2×) interpolation on 60 Hz capture formats (`PLAYGLIDE_60_TO_120_ON_60HZ=1`);
+    /// default keeps 30↔60 dynamic 1× menu passthrough on 60 Hz formats while 120 Hz capture formats
+    /// (1440p120 / 1080p120) run 60→120 and 40→120 automatically.
+    static var sixtyToOneTwentyOnSixtyHzEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_60_TO_120_ON_60HZ"] == "1"
     }
 
     static func supportsWindowHybrid(
@@ -728,7 +735,8 @@ actor FrameProcessor: VideoProcessingStage {
         hybridQuality: HybridQuality,
         dynamicCadenceCap: Bool = ContentCadence.dynamicCadenceCapEnabled,
         interactiveSixtyGuard: Bool = ContentCadence.interactiveSixtyGuardEnabled,
-        allow120HzCapture: Bool = CaptureCatalog.allow120HzCaptureEnabled
+        allow120HzCapture: Bool = CaptureCatalog.allow120HzCaptureEnabled,
+        sixtyToOneTwentyOnSixtyHz: Bool = FrameProcessor.sixtyToOneTwentyOnSixtyHzEnabled
     ) -> Bool {
         guard multiplier > 1, source != .window else { return false }
         let effectiveDelta = min(deltaSeconds, schedulingSeconds ?? deltaSeconds)
@@ -752,9 +760,8 @@ actor FrameProcessor: VideoProcessingStage {
             deltaSeconds < transportSeconds * 1.45
             || (schedulingSeconds.map { $0 < transportSeconds * 1.45 } ?? false)
         guard isSixtyFPSContent else { return false }
-        // With 120 Hz capture/interpolation enabled, allow 60→120 (2×) on fast720 or <= 1080p inputs
-        // where ANE low-latency interpolation stays well within the 8.33 ms 120 Hz frame budget.
-        if allow120HzCapture
+        // Optional 60→120 (2×) on 60 Hz capture formats when explicitly opted in on fast720 or <= 1080p.
+        if allow120HzCapture && sixtyToOneTwentyOnSixtyHz
             && (hybridQuality == .fast720 || inputSize.pixels <= InputPreset.hd1080.size.pixels)
         {
             return false

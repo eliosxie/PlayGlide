@@ -156,9 +156,9 @@ struct PendingWindowSurface: @unchecked Sendable {
 /// One immutable latest surface. Sampling does not manufacture new content when the window is unchanged.
 final class WindowFrameSampler: Sendable {
     /// Align fixed-rate window sampling phase with SCStream surface arrivals and defer CoreImage rendering
-    /// until a surface is actually sampled (`PLAYGLIDE_WINDOW_PHASE_LOCK=1`).
+    /// until a surface is actually sampled (`PLAYGLIDE_WINDOW_PHASE_LOCK=0` opts out for A/B rollback).
     static var phaseLockEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_WINDOW_PHASE_LOCK"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_WINDOW_PHASE_LOCK"] != "0"
     }
 
     private struct State {

@@ -292,7 +292,8 @@ actor PipelineSession {
                     let holdInterval = (cadence.schedulingInterval ?? interval).seconds
                     let passthroughNativeRate =
                         (adaptiveHarmonicRate && ContentCadence.isSixtyHzTransport(frame.duration.seconds)
-                            && !(allow120HzCapture && activeSettings.hybridQuality == .fast720)
+                            && !(allow120HzCapture && FrameProcessor.sixtyToOneTwentyOnSixtyHzEnabled
+                                && activeSettings.hybridQuality == .fast720)
                             && (holdInterval < frame.duration.seconds * 1.45
                                 || interval.seconds < frame.duration.seconds * 1.45))
                         || (allow120HzCapture && ContentCadence.isOneTwentyHzTransport(frame.duration.seconds)

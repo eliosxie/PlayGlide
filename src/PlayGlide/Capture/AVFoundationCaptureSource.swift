@@ -202,9 +202,9 @@ actor CaptureCatalog {
     static let frameRateMatchTolerance = 0.002
 
     /// Expose uncompressed 120 Hz UVC capture modes (e.g. 1440p120 / 1080p120 on Elgato 4K X) and unlock
-    /// high-refresh 60→120 (2×) and 40→120 (3×) interpolation pipelines (`PLAYGLIDE_ALLOW_120HZ_CAPTURE=1`).
+    /// high-refresh 60→120 (2×) and 40→120 (3×) interpolation pipelines (`PLAYGLIDE_ALLOW_120HZ_CAPTURE=0` opts out).
     static var allow120HzCaptureEnabled: Bool {
-        ProcessInfo.processInfo.environment["PLAYGLIDE_ALLOW_120HZ_CAPTURE"] == "1"
+        ProcessInfo.processInfo.environment["PLAYGLIDE_ALLOW_120HZ_CAPTURE"] != "0"
     }
 
     static func maximumFrameRate(allow120Hz: Bool = CaptureCatalog.allow120HzCaptureEnabled) -> Double {
