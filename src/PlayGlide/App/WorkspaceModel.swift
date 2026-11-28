@@ -5,8 +5,12 @@ import Foundation
 @MainActor
 final class WorkspaceModel: ObservableObject {
     @Published var draft = SessionDraft() {
-        didSet { savePreferences() }
+        didSet {
+            savePreferences()
+            scheduleHotApplyIfPossible()
+        }
     }
+    @Published var inspectorVisible = true
     @Published var audioControls = AudioPlaybackControls() {
         didSet {
             mailbox.setAudioControls(audioControls)
@@ -78,6 +82,7 @@ final class WorkspaceModel: ObservableObject {
     private var runTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var hideControlsTask: Task<Void, Never>?
+    private var hotApplyTask: Task<Void, Never>?
     private var hudPollTick = 0
     private var generation = UUID()
     private var pressureMonitor = PipelinePressureMonitor()
@@ -119,6 +124,14 @@ final class WorkspaceModel: ObservableObject {
         SessionPreferences.save(draft: draft, audioControls: audioControls, to: defaults)
     }
 
+    private func scheduleHotApplyIfPossible() {
+        guard !loadingPreferences, active, !stopRequested, canHotApplyConfiguration else { return }
+        hotApplyTask?.cancel()
+        hotApplyTask = Task { [weak self] in
+            await self?.applyConfiguration()
+        }
+    }
+
     private var selectedDevice: CaptureDeviceDescriptor? { devices.first { $0.id == draft.deviceID } }
     var formats: [CaptureFormatDescriptor] { selectedDevice?.formats ?? [] }
     var active: Bool { state != .idle }
@@ -152,7 +165,7 @@ final class WorkspaceModel: ObservableObject {
     }
 
     func chooseWindow() {
-        guard BuildFeatures.developmentTools, !active, !choosingWindow else { return }
+        guard !active, !choosingWindow else { return }
         errorMessage = nil
         choosingWindow = true
         windowPicker.onSelection = { [weak self] source in
@@ -547,6 +560,8 @@ final class WorkspaceModel: ObservableObject {
     }
     func stop() {
         guard active, !stopRequested else { return }
+        hotApplyTask?.cancel()
+        hotApplyTask = nil
         stopRequested = true
         state = .stopping
         syncSystemHDRMode()
@@ -583,13 +598,13 @@ final class WorkspaceModel: ObservableObject {
         await restart()
     }
     func selectQuickProfile(interpolation: InterpolationStrategy, hybridQuality: HybridQuality? = nil) {
-        draft.interpolation = interpolation
+        var next = draft
+        next.interpolation = interpolation
         if let hybridQuality {
-            draft.backend = .automatic
-            draft.hybridQuality = hybridQuality
+            next.backend = .automatic
+            next.hybridQuality = hybridQuality
         }
-        guard active, !stopRequested, canHotApplyConfiguration else { return }
-        Task { await applyConfiguration() }
+        draft = next
     }
     func restart() async {
         await stopAndWait()
@@ -645,7 +660,7 @@ final class WorkspaceModel: ObservableObject {
         }
     }
     func revealFullscreenControls() {
-        guard immersive else { return }
+        guard immersive, isApplicationActive() else { return }
         setCursorHidden(false)
         if !fullscreenControlsVisible { fullscreenControlsVisible = true }
         scheduleFullscreenIdleHide()
@@ -656,6 +671,7 @@ final class WorkspaceModel: ObservableObject {
     }
     func handleApplicationResignedActive() {
         cancelFullscreenIdleHide(restoreCursor: true)
+        if fullscreenControlsVisible { fullscreenControlsVisible = false }
     }
     func handleApplicationBecameActive() {
         guard immersive, !diagnosticsPresented else { return }

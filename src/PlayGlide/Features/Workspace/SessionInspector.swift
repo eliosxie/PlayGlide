@@ -1,366 +1,891 @@
+import AppKit
 import SwiftUI
 
 struct SessionInspector: View {
     @ObservedObject var model: WorkspaceModel
     let language: AppLanguage
+    @State private var audioDetailsExpanded = false
+    @State private var advancedExpanded = false
+
+    private var availableSources: [InputSource] {
+        BuildFeatures.developerUI ? InputSource.allCases : [.captureCard, .window]
+    }
+
+    private var availableInterpolationModes: [InterpolationStrategy] {
+        if model.draft.source == .window {
+            return [.off, .double]
+        }
+        return InterpolationStrategy.availableModes(
+            developmentTools: BuildFeatures.developerUI,
+            allow120Hz: CaptureCatalog.allow120HzCaptureEnabled)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            Form {
-                Section(language.text("输入", "Input")) {
-                    if BuildFeatures.developmentTools {
-                        Picker(language.text("来源", "Source"), selection: $model.draft.source) {
-                            ForEach(InputSource.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                        }
-                        .disabled(model.choosingWindow)
-                    }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    StudioSegmentedControl(
+                        selection: $model.draft.source,
+                        options: availableSources.map { ($0, shortSourceTitle($0)) }
+                    )
+                    .disabled(model.choosingWindow)
+
+                    signalCard
+                    motionCard
                     if model.draft.source == .captureCard {
-                        Picker(language.text("设备", "Device"), selection: $model.draft.deviceID) {
-                            if model.devices.isEmpty {
-                                Text(language.text("未发现外接视频设备", "No external video devices")).tag("")
-                            }
-                            ForEach(model.devices) { Text($0.name).tag($0.id) }
+                        audioCard
+                    }
+                    advancedCard
+                }
+                .padding(14)
+            }
+            .scrollIndicators(.hidden)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.07))
+                .frame(height: 1)
+
+            footerBar
+                .padding(14)
+                .background(Color.black.opacity(0.2))
+        }
+        .tint(.mint)
+        .onChange(of: model.availableUpscalingTargets, initial: true) { _, _ in
+            model.updateUpscalingTarget()
+        }
+        .onChange(of: model.draft.source) { _, nextSource in
+            if nextSource == .window && model.draft.interpolation.rawValue > 2 {
+                model.draft.interpolation = .double
+            }
+        }
+    }
+
+    private func shortSourceTitle(_ source: InputSource) -> String {
+        switch source {
+        case .captureCard: language.text("采集卡", "Capture Card")
+        case .window: language.text("窗口", "Window")
+        case .testPattern: language.text("测试源", "Test")
+        }
+    }
+
+    private var selectedDeviceLabel: String {
+        model.devices.first(where: { $0.id == model.draft.deviceID })?.name
+            ?? language.text("未连接采集卡", "No Capture Card")
+    }
+
+    private var selectedFormatLabel: String {
+        model.selectedFormat?.title.localized(in: language)
+            ?? language.text("请先连接采集卡", "Connect a capture card")
+    }
+
+    private var deviceMenuOptions: [StudioMenuOption] {
+        if model.devices.isEmpty {
+            return [StudioMenuOption(language.text("未连接采集卡", "No Capture Card"), isEnabled: false)]
+        }
+        return model.devices.map { device in
+            StudioMenuOption(device.name, isSelected: model.draft.deviceID == device.id) {
+                model.draft.deviceID = device.id
+                model.deviceChanged()
+            }
+        }
+    }
+
+    private var formatMenuOptions: [StudioMenuOption] {
+        if model.formats.isEmpty {
+            return [StudioMenuOption(language.text("请先连接采集卡", "Connect a capture card"), isEnabled: false)]
+        }
+        return model.formats.map { format in
+            StudioMenuOption(format.title.localized(in: language), isSelected: model.draft.formatID == format.id) {
+                model.draft.formatID = format.id
+            }
+        }
+    }
+
+    private var signalCard: some View {
+        InspectorCard(title: language.text("信号与画面", "Signal & Display"), icon: "display") {
+            if model.draft.source == .captureCard {
+                InspectorField(language.text("设备", "Device")) {
+                    HStack(spacing: 6) {
+                        StudioMenuButton(title: selectedDeviceLabel, options: deviceMenuOptions)
+                        Button {
+                            Task { await model.refreshDevices() }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.white.opacity(0.8))
+                                .frame(width: 28, height: 28)
+                                .background(
+                                    Color.white.opacity(0.06),
+                                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
+                                )
                         }
-                        .onChange(of: model.draft.deviceID) { _, _ in model.deviceChanged() }
-                        Picker(language.text("实际格式", "Capture Format"), selection: $model.draft.formatID) {
-                            if model.formats.isEmpty {
-                                Text(language.text("请连接并选择采集卡", "Connect and select a capture card")).tag("")
-                            }
-                            ForEach(model.formats) { Text($0.title.localized(in: language)).tag($0.id) }
-                        }
-                        Picker(language.text("色彩模式", "Color Mode"), selection: $model.draft.colorMode) {
-                            ForEach(InputColorMode.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                        }
-                        if model.draft.colorMode != .sdrRec709 {
-                            Picker(
-                                language.text("HDR 画面风格", "HDR Tone Style"),
-                                selection: $model.draft.hdrDisplayStyle
-                            ) {
-                                ForEach(HDRDisplayStyle.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                            }
-                            Picker(language.text("显示器 HDR", "Display HDR"), selection: $model.draft.systemHDRPolicy) {
-                                ForEach(SystemHDRPolicy.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                            }
-                            .onChange(of: model.draft.systemHDRPolicy) { _, _ in model.syncSystemHDRMode() }
-                        }
-                        Button(language.text("刷新设备与格式", "Refresh Devices and Formats"), systemImage: "arrow.clockwise")
-                        { Task { await model.refreshDevices() } }
-                        Toggle(
-                            language.text("播放采集卡音频并同步视频", "Play and Sync Capture Audio"),
-                            isOn: $model.draft.audioEnabled
+                        .buttonStyle(.plain)
+                        .help(language.text("刷新设备与格式", "Refresh Devices and Formats"))
+                    }
+                }
+
+                InspectorField(language.text("分辨率与帧率", "Format")) {
+                    StudioMenuButton(title: selectedFormatLabel, options: formatMenuOptions)
+                }
+
+                InspectorField(language.text("色彩模式", "Color Mode")) {
+                    StudioSegmentedControl(
+                        selection: $model.draft.colorMode,
+                        options: [
+                            (.sdrRec709, "SDR"),
+                            (.hdr10PQ, "HDR10"),
+                            (.automatic, language.text("自动", "Auto")),
+                        ]
+                    )
+                }
+
+                if model.draft.colorMode != .sdrRec709 {
+                    InspectorField(language.text("HDR 风格", "HDR Tone")) {
+                        StudioSegmentedControl(
+                            selection: $model.draft.hdrDisplayStyle,
+                            options: [
+                                (.enhanced, language.text("增强对比", "Enhanced")),
+                                (.reference, language.text("精准参考", "Reference")),
+                            ]
                         )
-                        .onChange(of: model.draft.audioEnabled) { _, _ in model.audioEnabledChanged() }
-                        if model.draft.audioEnabled {
-                            Picker(language.text("音频输入", "Audio Input"), selection: $model.draft.audioDeviceID) {
-                                Text(language.text("所选视频设备自带音频", "Audio from selected video device")).tag("")
-                                ForEach(model.audioDevices) { Text($0.name).tag($0.id) }
-                                if !model.draft.audioDeviceID.isEmpty,
-                                    !model.audioDevices.contains(where: { $0.id == model.draft.audioDeviceID })
-                                {
-                                    Text(language.text("所选音频设备已断开", "Selected audio device disconnected")).tag(
-                                        model.draft.audioDeviceID)
+                    }
+                    InspectorField(language.text("显示器 HDR", "Display HDR")) {
+                        StudioMenuButton(
+                            title: model.draft.systemHDRPolicy.title.localized(in: language),
+                            options: SystemHDRPolicy.allCases.map { policy in
+                                StudioMenuOption(
+                                    policy.title.localized(in: language),
+                                    isSelected: model.draft.systemHDRPolicy == policy
+                                ) {
+                                    model.draft.systemHDRPolicy = policy
+                                    model.syncSystemHDRMode()
                                 }
                             }
-                            Picker(
-                                language.text("音频输出", "Audio Output"), selection: $model.audioControls.outputDeviceID
-                            ) {
-                                Text(language.text("跟随系统输出", "System Output")).tag("")
-                                ForEach(model.audioOutputDevices) { device in
-                                    Text(
-                                        device.isDefault
-                                            ? language.text("\(device.name)（系统默认）", "\(device.name) (System Default)")
-                                            : device.name
-                                    ).tag(device.id)
-                                }
-                                if !model.audioControls.normalizedOutputDeviceID.isEmpty,
-                                    !model.audioOutputDevices.contains(where: {
-                                        $0.id == model.audioControls.normalizedOutputDeviceID
-                                    })
-                                {
-                                    Text(language.text("已断开（将自动回退系统默认）", "Disconnected (uses system output)")).tag(
-                                        model.audioControls.outputDeviceID)
-                                }
-                            }
-                            HStack(spacing: 10) {
-                                Button {
-                                    model.toggleAudioMute()
-                                } label: {
-                                    Label(
-                                        model.audioControls.muted
-                                            ? language.text("已静音", "Muted") : language.text("音量", "Volume"),
-                                        systemImage: model.audioControls.muted
-                                            ? "speaker.slash.fill" : "speaker.wave.2.fill"
-                                    )
-                                }
-                                .buttonStyle(.borderless)
-                                Slider(value: $model.audioControls.volume, in: 0...1)
-                                    .disabled(model.audioControls.muted)
-                                Text("\(Int((model.audioControls.clampedVolume * 100).rounded()))%")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 36, alignment: .trailing)
-                            }
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(language.text("音画手动偏移", "Audio Sync Offset"))
-                                    Spacer()
-                                    Text(String(format: "%+.0f ms", model.audioControls.clampedOffsetMilliseconds))
-                                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                                    if abs(model.audioControls.clampedOffsetMilliseconds) >= 1 {
-                                        Button(language.text("归零", "Reset")) { model.resetAudioOffset() }
-                                            .buttonStyle(.borderless).font(.caption)
-                                    }
-                                }
-                                Slider(
-                                    value: $model.audioControls.offsetMilliseconds,
-                                    in: AudioPlaybackControls
-                                        .minOffsetMilliseconds...AudioPlaybackControls
-                                        .maxOffsetMilliseconds,
-                                    step: 5)
-                                Text(
-                                    language.text(
-                                        "正值延后声音（适配高延迟电视/显示器），负值提前声音；实时生效无需重启。",
-                                        "Positive values delay audio. Negative values advance it. Changes apply immediately."
-                                    )
-                                )
-                                .font(.caption2).foregroundStyle(.secondary)
-                            }
-                            Text(
-                                language.text(
-                                    "已自动匹配采集卡伴生 HDMI 音频，不默认选用系统内建麦克风。声音跟随处理后画面的播放时间，通过系统当前音频输出播放。",
-                                    "PlayGlide matches the card's HDMI audio and times playback to the processed video."
-                                )
-                            )
-                            .font(.caption).foregroundStyle(.secondary)
-                            if BuildFeatures.developmentTools {
-                                let floor = model.draft.presentationMode.audioVideoDelayFloor(
-                                    multiplier: model.draft.interpolation.rawValue)
-                                let milliseconds = Int((floor * 1000).rounded())
-                                Text(
-                                    language.text(
-                                        "当前呈现策略为音频预留至少 \(milliseconds) ms 的视频调度预算。",
-                                        "This presentation mode reserves at least \(milliseconds) ms to sync video with audio."
-                                    )
-                                )
-                                .font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        if model.active, model.applied?.source == .captureCard, model.applied?.audioEnabled == true {
-                            LabeledContent(
-                                language.text("音频状态", "Audio Status"),
-                                value: model.statistics.audioStatus.localized(in: language)
-                            )
+                        )
+                    }
+                }
+            } else if model.draft.source == .window {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(language.text("目标窗口", "Target Window"))
                             .font(.caption)
-                        }
+                            .foregroundStyle(.secondary)
+                        Text(model.windowTitle.localized(in: language))
+                            .font(.callout.weight(.medium))
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button {
+                        model.chooseWindow()
+                    } label: {
                         Text(
-                            language.text(
-                                "开始采集时申请相机权限；启用音频后同时申请麦克风权限，以读取所选采集卡音频。HDR10 模式需在采集卡软件关闭硬件色调映射并在显示器开启 HDR。",
-                                "macOS requests camera access for capture and microphone access for capture-card audio. For HDR10, turn off capture-card tone mapping and enable HDR on the display."
-                            )
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
-                    } else if BuildFeatures.developmentTools, model.draft.source == .window {
-                        Text(model.windowTitle.localized(in: language)).font(.caption).foregroundStyle(.secondary)
-                            .lineLimit(2)
-                        Button(
                             model.choosingWindow
-                                ? language.text("请在系统选择器中选择…", "Choose a window in the system picker…")
-                                : language.text("选择窗口并开始采集", "Choose Window and Start Capture"),
-                            systemImage: "macwindow"
-                        ) {
-                            model.chooseWindow()
-                        }.disabled(model.active || model.choosingWindow)
-                        Picker(language.text("采集分辨率", "Capture Resolution"), selection: $model.draft.windowResolution) {
-                            ForEach(WindowResolutionMode.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                        }
-                        if model.draft.windowResolution == .fixed {
-                            Picker(language.text("采集画布", "Capture Canvas"), selection: $model.draft.windowPreset) {
-                                ForEach([InputPreset.hd1080, .qhd1440, .uhd4K]) {
-                                    Text($0.title.localized(in: language)).tag($0)
-                                }
+                                ? language.text("选择中…", "Picking…")
+                                : language.text("选择窗口", "Choose")
+                        )
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Color.white.opacity(0.08),
+                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.active || model.choosingWindow)
+                }
+
+                InspectorField(language.text("画质策略", "Resolution")) {
+                    StudioMenuButton(
+                        title: model.draft.windowResolution.title.localized(in: language),
+                        options: WindowResolutionMode.allCases.map { mode in
+                            StudioMenuOption(
+                                mode.title.localized(in: language),
+                                isSelected: model.draft.windowResolution == mode
+                            ) {
+                                model.draft.windowResolution = mode
                             }
-                            if model.draft.windowPreset == .uhd4K {
-                                Text(
-                                    language.text(
-                                        "2160p的2×使用原尺寸光流实验后端，保留4K处理像素；稳定60fps需实测。源窗口像素不足时，提高画布尺寸不会恢复原始细节。",
-                                        "At 2160p, 2× interpolation uses experimental optical flow at native resolution. Actual performance depends on the Mac. A larger canvas cannot recover missing source detail."
-                                    )
-                                )
-                                .font(.caption).foregroundStyle(.secondary)
-                            }
-                        } else if model.draft.windowResolution == .nativePixels {
-                            Text(
-                                language.text(
-                                    "按源窗口比例保留原生像素，不随预览缩小；长边最高3840、总像素不超过4K。放大PlayGlide不再先放大低尺寸采集图。高分辨率性能以实测为准。",
-                                    "Preserves the window's aspect ratio and native pixels, up to 3840 pixels on the long edge and 4K in total. High-resolution performance depends on the Mac."
-                                )
-                            )
-                            .font(.caption).foregroundStyle(.secondary)
-                        } else {
-                            Text(
-                                language.text(
-                                    "放大预览后自动提高有效采集尺寸；以源窗口实际像素和4K为上限。较高分辨率的补帧性能以实测为准。",
-                                    "Capture resolution grows with the preview, up to the window's native resolution or 4K. High-resolution interpolation performance depends on the Mac."
-                                )
-                            )
-                            .font(.caption).foregroundStyle(.secondary)
                         }
-                        Picker(language.text("网页采样", "Window Sampling"), selection: $model.draft.windowSampling) {
-                            ForEach(WindowSamplingRate.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                        }
-                        Text(
-                            language.text(
-                                "已知30帧视频按30 fps采样，吸收窗口回调抖动；静止画面仍会去重。其他片源可选按窗口回调，帧率以实际统计为准。",
-                                "For 30 fps video, fixed-rate sampling absorbs callback jitter and detects repeated frames. Other sources can follow window updates."
-                            )
+                    )
+                }
+
+                if model.draft.windowResolution == .fixed {
+                    InspectorField(language.text("采集画布", "Canvas")) {
+                        StudioSegmentedControl(
+                            selection: $model.draft.windowPreset,
+                            options: [
+                                (.hd1080, "1080p"),
+                                (.qhd1440, "1440p"),
+                                (.uhd4K, "4K"),
+                            ]
                         )
-                        .font(.caption).foregroundStyle(.secondary)
-                        Text(
-                            language.text(
-                                "先在浏览器播放视频，再选择该窗口，无需铺满显示器。窗口内容保持原比例完整显示；画布多余部分留黑边，窗口内留白也会保留。声音由浏览器播放，未补偿音画延迟。",
-                                "Start playback in the browser, then select its window. PlayGlide fits the full window at its original aspect ratio. The browser continues to play audio at its own timing."
-                            )
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
-                        Text(
-                            language.text(
-                                "这是已显示窗口的采集，不是网站原始视频解码。控制条、字幕和网页动画也会被识别为内容变化。",
-                                "Window capture includes visible controls, subtitles, and page animations. They count as changes in the captured image."
-                            )
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
-                    } else if BuildFeatures.developmentTools {
-                        Picker(language.text("原始尺寸", "Source Resolution"), selection: $model.draft.inputPreset) {
-                            ForEach(InputPreset.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                        }
-                        Picker(language.text("传输场景", "Signal Pattern"), selection: $model.draft.testSignal) {
-                            ForEach(TestSignal.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                        }
-                        Text(
-                            language.text(
-                                "生成运动图案，可直接体验补帧、原画对照和全屏预览。",
-                                "Try interpolation, split comparison, and fullscreen with a generated pattern.")
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Section(language.text("游戏内容与补帧", "Content and Interpolation")) {
-                    Picker(language.text("内容节奏", "Content Cadence"), selection: $model.draft.contentMode) {
-                        ForEach(ContentMode.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                    }
-                    Picker(language.text("补帧", "Interpolation"), selection: $model.draft.interpolation) {
-                        ForEach(InterpolationStrategy.availableModes) { Text($0.title.localized(in: language)).tag($0) }
-                    }
-                    if BuildFeatures.developmentTools {
-                        Picker(language.text("处理器", "Processing Engine"), selection: $model.draft.backend) {
-                            ForEach(ProcessingBackend.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                        }
-                    }
-                    if model.draft.interpolation == .double && model.draft.backend == .automatic
-                        && (model.draft.source != .window || FrameProcessor.windowHybridEnabled)
-                    {
-                        Picker(language.text("补帧档位", "Interpolation Quality"), selection: $model.draft.hybridQuality) {
-                            ForEach(HybridQuality.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                        }
-                    }
-                    if model.draft.interpolation != .off {
-                        Picker(language.text("呈现策略", "Presentation Mode"), selection: $model.draft.presentationMode) {
-                            ForEach(PresentationMode.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                        }
-                        Text(
-                            language.text(
-                                "低延迟优先使用屏幕最高刷新率，减少显示等待；新画面速率仍由内容与补帧倍率决定。平稳优先按输出节奏刷新，多预留一张输出帧吸收抖动。",
-                                "Low Latency uses the highest display refresh rate to minimize wait time. Steady Playback follows the output cadence and buffers an extra frame to absorb jitter."
-                            )
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
-                    }
-                    if model.draft.interpolation != .off && model.draft.source != .window {
-                        Picker(language.text("能耗偏好", "Power Preference"), selection: $model.draft.powerPreference) {
-                            ForEach(InterpolationPowerPreference.allCases) {
-                                Text($0.title.localized(in: language)).tag($0)
+            } else if BuildFeatures.developerUI {
+                InspectorField(language.text("原始尺寸", "Resolution")) {
+                    StudioMenuButton(
+                        title: model.draft.inputPreset.title.localized(in: language),
+                        options: InputPreset.allCases.map { preset in
+                            StudioMenuOption(
+                                preset.title.localized(in: language),
+                                isSelected: model.draft.inputPreset == preset
+                            ) {
+                                model.draft.inputPreset = preset
                             }
                         }
-                        Text(
-                            language.text(
-                                "低延迟优先在补帧间隙保持芯片性能状态以压低尾延迟；省电优先停用帧间忙等以降低整机功耗与发热。",
-                                "Low Latency holds SoC performance state between interpolated pairs to reduce tail latency. Power Saving disables inter-frame spinning to reduce power and heat."
-                            )
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
-                    }
-                    if BuildFeatures.developmentTools {
-                        Text(
-                            language.text(
-                                "自动模式：跟随预览的窗口2×使用原尺寸光流；固定画布与采集卡按实际尺寸选择VT或光流。高分辨率性能与画质以实测为准。",
-                                "Automatic mode uses native optical flow for 2× window capture that follows the preview. Fixed canvases and capture cards use an engine suited to their input resolution."
-                            )
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
-                    }
+                    )
                 }
-                let targets = model.availableUpscalingTargets
-                if !targets.isEmpty {
-                    Section(language.text("画面放大", "Upscaling")) {
-                        Picker(language.text("超分", "Upscaling Method"), selection: $model.draft.upscaling) {
-                            ForEach(UpscalingStrategy.allCases) { Text($0.title.localized(in: language)).tag($0) }
-                        }
-                        if model.draft.upscaling != .off {
-                            Picker(language.text("输出目标", "Output Resolution"), selection: $model.draft.outputPreset) {
-                                ForEach(targets) { Text($0.title.localized(in: language)).tag($0) }
+                InspectorField(language.text("信号场景", "Pattern")) {
+                    StudioMenuButton(
+                        title: model.draft.testSignal.title.localized(in: language),
+                        options: TestSignal.allCases.map { signal in
+                            StudioMenuOption(
+                                signal.title.localized(in: language),
+                                isSelected: model.draft.testSignal == signal
+                            ) {
+                                model.draft.testSignal = signal
                             }
                         }
-                    }
+                    )
                 }
             }
-            .formStyle(.grouped)
-            .onChange(of: model.availableUpscalingTargets, initial: true) { _, _ in
-                model.updateUpscalingTarget()
+        }
+    }
+
+    private var motionCard: some View {
+        InspectorCard(title: language.text("流畅度与画质", "Motion & Clarity"), icon: "sparkles") {
+            InspectorField(language.text("补帧模式", "Frame Generation")) {
+                StudioSegmentedControl(
+                    selection: $model.draft.interpolation,
+                    options: availableInterpolationModes.map { ($0, shortInterpolationTitle($0)) }
+                )
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                if model.configurationChanged && model.active {
-                    if model.canHotApplyConfiguration {
-                        Text(
-                            language.text(
-                                "处理设置已修改，可免断流实时生效（不断画面与音频）。", "Updated processing settings can apply during playback.")
+            if model.draft.interpolation == .double && model.draft.backend == .automatic {
+                InspectorField(language.text("补帧档位", "Quality Preset")) {
+                    StudioSegmentedControl(
+                        selection: $model.draft.hybridQuality,
+                        options: [
+                            (.hd1080, language.text("高清 · 1080p", "High · 1080p")),
+                            (.fast720, language.text("极速 · 720p", "Fast · 720p")),
+                        ]
+                    )
+                }
+                .help(
+                    language.text(
+                        "高清档细节更锐利（⌘1）；极速档延迟更低（⌘2），随时实时切换不断流。",
+                        "High maximizes motion detail (⌘1). Fast lowers latency (⌘2). Applies live."
+                    ))
+            }
+
+            if model.draft.interpolation != .off && model.draft.source != .window {
+                InspectorField(language.text("响应与功耗", "Responsiveness")) {
+                    StudioSegmentedControl(
+                        selection: $model.draft.powerPreference,
+                        options: [
+                            (.lowLatency, language.text("低延迟", "Low Latency")),
+                            (.powerSaving, language.text("省电静音", "Power Saving")),
+                        ]
+                    )
+                }
+                .help(
+                    language.text(
+                        "低延迟保持性能状态以压低尾延迟；省电静音关闭帧间等待大幅降低 CPU 功耗。",
+                        "Low Latency holds chip performance state for lower latency; Power Saving significantly reduces CPU power."
+                    ))
+            }
+
+            let targets = model.availableUpscalingTargets
+            if !targets.isEmpty {
+                Rectangle()
+                    .fill(Color.white.opacity(0.06))
+                    .frame(height: 1)
+                HStack {
+                    Text(language.text("MetalFX 超分", "MetalFX Upscaling"))
+                        .font(.callout)
+                    Spacer()
+                    StudioSwitch(
+                        isOn: Binding(
+                            get: { model.draft.upscaling == .metalFXSpatial },
+                            set: { model.draft.upscaling = $0 ? .metalFXSpatial : .off }
+                        ))
+                }
+                if model.draft.upscaling != .off {
+                    InspectorField(language.text("输出目标", "Target Size")) {
+                        StudioMenuButton(
+                            title: model.draft.outputPreset.title.localized(in: language),
+                            options: targets.map { target in
+                                StudioMenuOption(
+                                    target.title.localized(in: language),
+                                    isSelected: model.draft.outputPreset == target
+                                ) {
+                                    model.draft.outputPreset = target
+                                }
+                            }
                         )
-                        .font(.caption).foregroundStyle(.mint)
-                        Button(language.text("实时应用（不断流）", "Apply Live"), systemImage: "bolt.fill") {
-                            Task { await model.applyConfiguration() }
-                        }.frame(maxWidth: .infinity)
-                    } else {
-                        Text(
-                            language.text("设置已修改，重启后应用。正在运行的配置保持独立。", "Restart capture to apply the updated settings.")
-                        )
-                        .font(.caption).foregroundStyle(.orange)
-                        Button(
-                            language.text("应用并重启", "Apply and Restart"), systemImage: "arrow.trianglehead.2.clockwise"
-                        ) {
-                            Task { await model.restart() }
-                        }.frame(maxWidth: .infinity)
                     }
                 }
+            }
+        }
+    }
+
+    private func shortInterpolationTitle(_ mode: InterpolationStrategy) -> String {
+        switch mode {
+        case .off: language.text("直通", "Off")
+        case .double: "2×"
+        case .triple: "3×"
+        case .quadruple: "4×"
+        }
+    }
+
+    private var selectedAudioInputLabel: String {
+        if model.draft.audioDeviceID.isEmpty {
+            return language.text("采集卡自带音频", "Capture Card Audio")
+        }
+        return model.audioDevices.first(where: { $0.id == model.draft.audioDeviceID })?.name
+            ?? language.text("已断开", "Disconnected")
+    }
+
+    private var audioInputOptions: [StudioMenuOption] {
+        var list = [
+            StudioMenuOption(
+                language.text("采集卡自带音频", "Capture Card Audio"),
+                isSelected: model.draft.audioDeviceID.isEmpty
+            ) {
+                model.draft.audioDeviceID = ""
+            }
+        ]
+        list.append(
+            contentsOf: model.audioDevices.map { device in
+                StudioMenuOption(device.name, isSelected: model.draft.audioDeviceID == device.id) {
+                    model.draft.audioDeviceID = device.id
+                }
+            })
+        return list
+    }
+
+    private var audioOutputOptions: [StudioMenuOption] {
+        var list = [
+            StudioMenuOption(
+                language.text("跟随系统默认", "System Default"),
+                isSelected: model.audioControls.normalizedOutputDeviceID.isEmpty
+            ) {
+                model.audioControls.outputDeviceID = ""
+            }
+        ]
+        list.append(
+            contentsOf: model.audioOutputDevices.map { device in
+                let label =
+                    device.isDefault
+                    ? language.text("\(device.name)（默认）", "\(device.name) (Default)")
+                    : device.name
+                return StudioMenuOption(
+                    label,
+                    isSelected: model.audioControls.normalizedOutputDeviceID == device.id
+                ) {
+                    model.audioControls.outputDeviceID = device.id
+                }
+            })
+        return list
+    }
+
+    private var audioCard: some View {
+        InspectorCard(
+            title: language.text("音频", "Audio"),
+            icon: model.audioControls.muted ? "speaker.slash.fill" : "speaker.wave.2.fill"
+        ) {
+            StudioSwitch(isOn: $model.draft.audioEnabled)
+                .onChange(of: model.draft.audioEnabled) { _, _ in model.audioEnabledChanged() }
+        } content: {
+            if model.draft.audioEnabled {
+                HStack(spacing: 10) {
+                    Button {
+                        model.toggleAudioMute()
+                    } label: {
+                        Image(systemName: model.audioControls.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .foregroundStyle(model.audioControls.muted ? Color.secondary : Color.mint)
+                            .frame(width: 20)
+                    }
+                    .buttonStyle(.plain)
+                    Slider(value: $model.audioControls.volume, in: 0...1)
+                        .tint(.mint)
+                        .disabled(model.audioControls.muted)
+                    Text("\(Int((model.audioControls.clampedVolume * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, alignment: .trailing)
+                }
+
+                StudioDisclosureRow(
+                    title: language.text("设备与音画偏移", "Devices & Sync Offset"),
+                    isExpanded: $audioDetailsExpanded
+                ) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        InspectorField(language.text("音频输入", "Audio Input")) {
+                            StudioMenuButton(title: selectedAudioInputLabel, options: audioInputOptions)
+                        }
+
+                        InspectorField(language.text("音频输出", "Audio Output")) {
+                            StudioMenuButton(
+                                title: model.selectedAudioOutputName.localized(in: language),
+                                options: audioOutputOptions
+                            )
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(language.text("音画偏移", "Sync Offset"))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text(String(format: "%+.0f ms", model.audioControls.clampedOffsetMilliseconds))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                if abs(model.audioControls.clampedOffsetMilliseconds) >= 1 {
+                                    Button(language.text("归零", "Reset")) { model.resetAudioOffset() }
+                                        .buttonStyle(.plain)
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(.mint)
+                                }
+                            }
+                            Slider(
+                                value: $model.audioControls.offsetMilliseconds,
+                                in: AudioPlaybackControls
+                                    .minOffsetMilliseconds...AudioPlaybackControls
+                                    .maxOffsetMilliseconds,
+                                step: 5
+                            )
+                            .tint(.mint)
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+            } else {
+                Text(language.text("开启以同步播放采集卡 HDMI 声音", "Enable to play synced HDMI audio"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var advancedCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            StudioDisclosureRow(
+                title: language.text("高级设置", "Advanced"),
+                isExpanded: $advancedExpanded
+            ) {
+                VStack(alignment: .leading, spacing: 12) {
+                    if model.draft.interpolation != .off {
+                        InspectorField(language.text("呈现策略", "Presentation")) {
+                            StudioSegmentedControl(
+                                selection: $model.draft.presentationMode,
+                                options: PresentationMode.allCases.map { ($0, $0.title.localized(in: language)) }
+                            )
+                        }
+                    }
+
+                    InspectorField(language.text("帧率检测", "Cadence Detection")) {
+                        StudioMenuButton(
+                            title: model.draft.contentMode.title.localized(in: language),
+                            options: ContentMode.allCases.map { mode in
+                                StudioMenuOption(
+                                    mode.title.localized(in: language),
+                                    isSelected: model.draft.contentMode == mode
+                                ) {
+                                    model.draft.contentMode = mode
+                                }
+                            }
+                        )
+                    }
+
+                    if model.draft.source == .window {
+                        InspectorField(language.text("窗口采样", "Window Sampling")) {
+                            StudioMenuButton(
+                                title: model.draft.windowSampling.title.localized(in: language),
+                                options: WindowSamplingRate.allCases.map { rate in
+                                    StudioMenuOption(
+                                        rate.title.localized(in: language),
+                                        isSelected: model.draft.windowSampling == rate
+                                    ) {
+                                        model.draft.windowSampling = rate
+                                    }
+                                }
+                            )
+                        }
+                    }
+
+                    HStack {
+                        Text(language.text("全屏帧率角标", "Fullscreen FPS Badge"))
+                            .font(.callout)
+                        Spacer()
+                        StudioSwitch(isOn: $model.fullscreenHUDVisible)
+                    }
+                    .help(
+                        language.text(
+                            "在全屏播放时于左上角显示实时帧率角标（⌥⌘S）。",
+                            "Show a subtle live FPS badge in the top-left corner while in fullscreen (⌥⌘S)."
+                        ))
+
+                    if BuildFeatures.developerUI {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.06))
+                            .frame(height: 1)
+                        InspectorField(language.text("开发者处理器", "Developer Engine")) {
+                            StudioMenuButton(
+                                title: model.draft.backend.title.localized(in: language),
+                                options: ProcessingBackend.allCases.map { backend in
+                                    StudioMenuOption(
+                                        backend.title.localized(in: language),
+                                        isSelected: model.draft.backend == backend
+                                    ) {
+                                        model.draft.backend = backend
+                                    }
+                                }
+                            )
+                        }
+                        Button(language.text("开发者性能诊断", "Developer Diagnostics")) {
+                            model.diagnosticsPresented = true
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(.top, 10)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    private var footerBar: some View {
+        VStack(spacing: 8) {
+            if model.configurationChanged && model.active && !model.canHotApplyConfiguration {
                 Button {
-                    if model.active { model.stop() } else { model.start() }
+                    Task { await model.restart() }
                 } label: {
                     Label(
-                        model.active
-                            ? language.text("停止", "Stop")
-                            : BuildFeatures.developmentTools && model.draft.source == .testPattern
-                                ? language.text("运行测试源", "Run Test Pattern") : language.text("开始采集", "Start Capture"),
-                        systemImage: model.active ? "stop.fill" : "play.fill"
+                        language.text("应用更改并重启", "Apply Changes & Restart"),
+                        systemImage: "arrow.trianglehead.2.clockwise"
                     )
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.black)
                     .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(Color.orange, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 }
-                .buttonStyle(.borderedProminent).controlSize(.large)
-                .disabled(model.state == .stopping || (!model.active && !model.canStart))
-                if let interpolation = model.applied?.interpolation.title.localized(in: language), model.active {
-                    Text(language.text("当前补帧：\(interpolation)", "Current interpolation: \(interpolation)"))
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                .buttonStyle(.plain)
             }
-            .padding(18)
+
+            Button {
+                if model.active { model.stop() } else { model.start() }
+            } label: {
+                let isRunning = model.active
+                let isDisabled = model.state == .stopping || (!isRunning && !model.canStart)
+                let startTitle =
+                    model.draft.source == .window
+                    ? language.text("开始采集", "Start Capture")
+                    : language.text("开始游玩", "Start Session")
+                Label(
+                    isRunning ? language.text("停止采集", "Stop Session") : startTitle,
+                    systemImage: isRunning ? "stop.fill" : "play.fill"
+                )
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(
+                    isDisabled
+                        ? Color.white.opacity(0.38)
+                        : (isRunning ? Color(red: 1.0, green: 0.45, blue: 0.46) : .black)
+                )
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(
+                    isDisabled
+                        ? Color.white.opacity(0.06)
+                        : (isRunning ? Color.red.opacity(0.14) : Color.mint),
+                    in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(
+                            isDisabled
+                                ? Color.white.opacity(0.09)
+                                : (isRunning ? Color.red.opacity(0.32) : Color.clear),
+                            lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(model.state == .stopping || (!model.active && !model.canStart))
+        }
+    }
+}
+
+private struct StudioSegmentedControl<Value: Hashable>: View {
+    @Binding var selection: Value
+    let options: [(value: Value, title: String)]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(Array(options.enumerated()), id: \.offset) { _, item in
+                let isSelected = selection == item.value
+                Button {
+                    withAnimation(.easeInOut(duration: 0.14)) {
+                        selection = item.value
+                    }
+                } label: {
+                    Text(item.title)
+                        .font(.caption.weight(isSelected ? .semibold : .medium))
+                        .foregroundStyle(isSelected ? .white : .white.opacity(0.62))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 6)
+                        .background(
+                            isSelected ? Color.mint.opacity(0.22) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(isSelected ? Color.mint.opacity(0.45) : Color.clear, lineWidth: 1)
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.07), lineWidth: 1)
+        )
+    }
+}
+
+private struct StudioMenuOption {
+    let title: String
+    let isSelected: Bool
+    let isEnabled: Bool
+    let action: () -> Void
+
+    init(_ title: String, isSelected: Bool = false, isEnabled: Bool = true, action: @escaping () -> Void = {}) {
+        self.title = title
+        self.isSelected = isSelected
+        self.isEnabled = isEnabled
+        self.action = action
+    }
+}
+
+private struct StudioMenuButton: View {
+    let title: String
+    let options: [StudioMenuOption]
+
+    var body: some View {
+        ZStack {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .frame(maxWidth: .infinity)
+            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
+            )
+            .allowsHitTesting(false)
+
+            StudioMenuHitTarget(title: title, options: options)
+                .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 28)
+        }
+        .frame(height: 28)
+    }
+}
+
+private struct StudioMenuHitTarget: NSViewRepresentable {
+    let title: String
+    let options: [StudioMenuOption]
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(title: "", target: context.coordinator, action: #selector(Coordinator.showMenu(_:)))
+        button.isBordered = false
+        button.isTransparent = true
+        button.focusRingType = .none
+        button.sendAction(on: [.leftMouseDown])
+        button.setAccessibilityRole(.popUpButton)
+        return button
+    }
+
+    func updateNSView(_ nsView: NSButton, context: Context) {
+        context.coordinator.options = options
+        nsView.setAccessibilityTitle(title)
+    }
+
+    final class Coordinator: NSObject {
+        var options: [StudioMenuOption] = []
+
+        @MainActor @objc func showMenu(_ sender: NSButton) {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            menu.minimumWidth = sender.bounds.width
+            for (index, option) in options.enumerated() {
+                let item = NSMenuItem(
+                    title: option.title, action: #selector(selectOption(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = index
+                item.state = option.isSelected ? .on : .off
+                item.isEnabled = option.isEnabled
+                menu.addItem(item)
+            }
+            let origin = NSPoint(x: 0, y: sender.isFlipped ? sender.bounds.height + 4 : -4)
+            menu.popUp(positioning: nil, at: origin, in: sender)
+        }
+
+        @MainActor @objc private func selectOption(_ sender: NSMenuItem) {
+            guard options.indices.contains(sender.tag) else { return }
+            options[sender.tag].action()
+        }
+    }
+}
+
+private struct StudioSwitch: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.16)) {
+                isOn.toggle()
+            }
+        } label: {
+            ZStack(alignment: isOn ? .trailing : .leading) {
+                Capsule()
+                    .fill(isOn ? Color.mint : Color.white.opacity(0.16))
+                    .frame(width: 34, height: 19)
+                Circle()
+                    .fill(.white)
+                    .frame(width: 15, height: 15)
+                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+                    .padding(2)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(.isToggle)
+    }
+}
+
+private struct StudioDisclosureRow<Content: View>: View {
+    let title: String
+    @Binding var isExpanded: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack {
+                    Text(title)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                content()
+            }
+        }
+    }
+}
+
+private struct InspectorCard<Trailing: View, Content: View>: View {
+    let title: String
+    let icon: String
+    @ViewBuilder let headerTrailing: () -> Trailing
+    @ViewBuilder let content: () -> Content
+
+    init(
+        title: String,
+        icon: String,
+        @ViewBuilder headerTrailing: @escaping () -> Trailing = { EmptyView() },
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.title = title
+        self.icon = icon
+        self.headerTrailing = headerTrailing
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 7) {
+                Image(systemName: icon)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.mint)
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.84))
+                Spacer()
+                headerTrailing()
+            }
+            content()
+        }
+        .padding(13)
+        .background(Color.white.opacity(0.042), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.075), lineWidth: 1)
+        )
+    }
+}
+
+private struct InspectorField<Content: View>: View {
+    let label: String
+    @ViewBuilder let content: () -> Content
+
+    init(_ label: String, @ViewBuilder content: @escaping () -> Content) {
+        self.label = label
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

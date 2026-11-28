@@ -43,9 +43,10 @@ struct PlayGlideApp: App {
     var body: some Scene {
         let interfaceLanguage = language.resolved
         Window("PlayGlide", id: "workspace") {
-            WorkspaceView(model: workspace, language: interfaceLanguage)
+            WorkspaceView(model: workspace, language: interfaceLanguage, languageSelection: $language)
                 .environment(\.locale, language.locale)
-                .frame(minWidth: 1080, minHeight: 760)
+                .preferredColorScheme(.dark)
+                .frame(minWidth: 1000, minHeight: 680)
                 .task {
                     #if PLAYGLIDE_DEVELOPMENT
                         if ProcessInfo.processInfo.arguments.contains("--demo-autostart") {
@@ -55,8 +56,9 @@ struct PlayGlideApp: App {
                     #endif
                 }
         }
-        .defaultSize(width: 1360, height: 900)
+        .defaultSize(width: 1360, height: 860)
         .windowStyle(.titleBar)
+        .windowToolbarStyle(.unified(showsTitle: false))
         .restorationBehavior(.disabled)
         .commands {
             CommandMenu("Language / 语言") {
@@ -77,6 +79,15 @@ struct PlayGlideApp: App {
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
                 .disabled(workspace.state == .stopping || (!workspace.active && !workspace.canStart))
+                Button(
+                    workspace.inspectorVisible
+                        ? interfaceLanguage.text("隐藏设置栏", "Hide Inspector")
+                        : interfaceLanguage.text("显示设置栏", "Show Inspector")
+                ) {
+                    workspace.inspectorVisible.toggle()
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .disabled(workspace.previewOnly)
                 Button(
                     workspace.previewExpanded
                         ? interfaceLanguage.text("恢复工作区", "Restore Workspace")
@@ -109,20 +120,21 @@ struct PlayGlideApp: App {
                 }
                 .keyboardShortcut("2", modifiers: [.command])
             }
-            CommandMenu(Text(verbatim: interfaceLanguage.text("性能", "Performance"))) {
-                if BuildFeatures.developmentTools {
-                    Button(interfaceLanguage.text("性能与延迟详情", "Performance and Latency Details")) {
-                        workspace.diagnosticsPresented = true
-                    }
-                }
+            CommandMenu(Text(verbatim: interfaceLanguage.text("视图", "View"))) {
                 Button(
                     workspace.fullscreenHUDVisible
-                        ? interfaceLanguage.text("隐藏全屏帧率与延迟", "Hide Fullscreen FPS and Latency")
-                        : interfaceLanguage.text("显示全屏帧率与延迟", "Show Fullscreen FPS and Latency")
+                        ? interfaceLanguage.text("隐藏全屏帧率角标", "Hide Fullscreen FPS Badge")
+                        : interfaceLanguage.text("显示全屏帧率角标", "Show Fullscreen FPS Badge")
                 ) {
                     workspace.toggleFullscreenHUD()
                 }
                 .keyboardShortcut("s", modifiers: [.command, .option])
+                if BuildFeatures.developerUI {
+                    Divider()
+                    Button(interfaceLanguage.text("开发者性能诊断", "Developer Diagnostics")) {
+                        workspace.diagnosticsPresented = true
+                    }
+                }
             }
         }
     }

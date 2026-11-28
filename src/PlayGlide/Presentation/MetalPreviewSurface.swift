@@ -2487,6 +2487,7 @@ final class MetalPreviewView: NSView {
         window?.screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0
     }
     private var pointerTrackingArea: NSTrackingArea?
+    private var lastPointerLocation: NSPoint?
     private var immersive = false
     private var hdr10Active = false
     private var hdrDisplayStyle: HDRDisplayStyle = .defaultStyle
@@ -2523,6 +2524,7 @@ final class MetalPreviewView: NSView {
     func setImmersive(_ value: Bool) {
         guard immersive != value else { return }
         immersive = value
+        lastPointerLocation = value ? window?.mouseLocationOutsideOfEventStream : nil
         resizeSurface()
     }
     func setHDRDisplayStyle(_ style: HDRDisplayStyle) {
@@ -2562,6 +2564,12 @@ final class MetalPreviewView: NSView {
     }
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
+        guard immersive else { return }
+        let location = event.locationInWindow
+        if let last = lastPointerLocation, hypot(location.x - last.x, location.y - last.y) < 3.0 {
+            return
+        }
+        lastPointerLocation = location
         onPointerMove?()
     }
     override func layout() {

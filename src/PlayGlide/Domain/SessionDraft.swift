@@ -7,6 +7,12 @@ enum BuildFeatures {
     #else
         static let developmentTools = false
     #endif
+
+    /// Developer-only controls (built-in test patterns, raw engine selectors, diagnostics sheet) remain hidden
+    /// in the consumer UI unless explicitly requested via `PLAYGLIDE_DEV_UI=1`.
+    static var developerUI: Bool {
+        developmentTools && ProcessInfo.processInfo.environment["PLAYGLIDE_DEV_UI"] == "1"
+    }
 }
 
 struct SessionDraft: Sendable, Equatable {
@@ -35,10 +41,17 @@ struct SessionDraft: Sendable, Equatable {
     var powerPreference: InterpolationPowerPreference = .lowLatency
 
     var isAvailableInBuild: Bool {
-        BuildFeatures.developmentTools
-            || (source == .captureCard && backend == .automatic
-                && (interpolation == .off || interpolation == .double
-                    || (interpolation == .triple && CaptureCatalog.allow120HzCaptureEnabled)))
+        if BuildFeatures.developmentTools { return true }
+        guard backend == .automatic else { return false }
+        switch source {
+        case .captureCard:
+            return interpolation == .off || interpolation == .double
+                || (interpolation == .triple && CaptureCatalog.allow120HzCaptureEnabled)
+        case .window:
+            return interpolation == .off || interpolation == .double
+        case .testPattern:
+            return false
+        }
     }
 
     var usesStableWindowCadence: Bool {

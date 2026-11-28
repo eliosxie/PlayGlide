@@ -28,6 +28,14 @@ enum AppLanguage: String, CaseIterable, Sendable {
         }
     }
 
+    var compactLabel: String {
+        switch self {
+        case .system: resolved == .simplifiedChinese ? "中文" : "EN"
+        case .english: "EN"
+        case .simplifiedChinese: "中文"
+        }
+    }
+
     func text(_ chinese: @autoclosure () -> String, _ english: @autoclosure () -> String) -> String {
         resolved == .simplifiedChinese ? chinese() : english()
     }
