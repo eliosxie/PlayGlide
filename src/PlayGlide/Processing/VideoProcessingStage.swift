@@ -110,6 +110,20 @@ struct ProcessingPlan: Sendable, Equatable {
 }
 
 actor FrameProcessor: VideoProcessingStage {
+    /// Enable `HybridInterpolator` for even-sized 2× window capture (`PLAYGLIDE_WINDOW_HYBRID=1`).
+    static var windowHybridEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_WINDOW_HYBRID"] == "1"
+    }
+
+    static func supportsWindowHybrid(
+        size: VideoSize, settings: SessionDraft,
+        windowHybridAllowed: Bool = FrameProcessor.windowHybridEnabled
+    ) -> Bool {
+        windowHybridAllowed && settings.source == .window && settings.backend == .automatic
+            && settings.interpolation == .double && size.width >= 64 && size.height >= 64
+            && size.width.isMultiple(of: 2) && size.height.isMultiple(of: 2)
+    }
+
     private var settings: SessionDraft
     private let generation: UUID
     private let mailbox: FrameMailbox
@@ -118,6 +132,7 @@ actor FrameProcessor: VideoProcessingStage {
     private let preferFlowTextureViews: Bool
     private let preservesFlowHDR10: Bool
     private let allow120HzCapture: Bool
+    private let windowHybridAllowed: Bool
     private var usesStableWindowCadence: Bool
     private var plan: ProcessingPlan?
     private var processor: VTFrameProcessor?
@@ -150,7 +165,8 @@ actor FrameProcessor: VideoProcessingStage {
         settings: SessionDraft, generation: UUID, mailbox: FrameMailbox, preferFlowTextureViews: Bool = true,
         useUserInteractiveQueue: Bool = PipelineSession.userInteractiveQoSEnabled,
         preservesFlowHDR10: Bool = FlowInterpolator.hdrPassthroughEnabled,
-        allow120HzCapture: Bool = CaptureCatalog.allow120HzCaptureEnabled
+        allow120HzCapture: Bool = CaptureCatalog.allow120HzCaptureEnabled,
+        windowHybridAllowed: Bool = FrameProcessor.windowHybridEnabled
     ) {
         self.settings = settings
         self.generation = generation
@@ -162,6 +178,7 @@ actor FrameProcessor: VideoProcessingStage {
         self.preferFlowTextureViews = preferFlowTextureViews
         self.preservesFlowHDR10 = preservesFlowHDR10
         self.allow120HzCapture = allow120HzCapture
+        self.windowHybridAllowed = windowHybridAllowed
         usesStableWindowCadence = settings.usesStableWindowCadence
     }
 
@@ -180,9 +197,11 @@ actor FrameProcessor: VideoProcessingStage {
         flowInterpolator = nil
         hybrid = nil
         sourcePool = nil
+        let windowHybrid2x = Self.supportsWindowHybrid(
+            size: size, settings: settings, windowHybridAllowed: windowHybridAllowed)
         let hybrid2x =
             plan.backend == .opticalFlow && plan.multiplier == 2 && hybridAllowed && settings.backend == .automatic
-            && settings.source != .window
+            && (settings.source != .window || windowHybrid2x)
         let hybridHighRefresh =
             plan.backend == .frameRateConversion && (plan.multiplier == 3 || plan.multiplier == 4) && hybridAllowed
             && settings.backend == .automatic && settings.source != .window
@@ -191,14 +210,19 @@ actor FrameProcessor: VideoProcessingStage {
             let low = HybridInterpolator.lowSize(
                 for: size, maxHeight: plan.multiplier >= 3 ? 720 : settings.hybridQuality.maxLowHeight)
         {
-            let hybrid = try HybridInterpolator(size: size, low: low, multiplier: plan.multiplier)
-            self.hybrid = hybrid
-            mailbox.mutate(generation) {
-                $0.backend = AppText(
-                    "原尺寸原帧 + VT \(hybrid.low) 中间帧 \(plan.multiplier)×",
-                    "Native originals + VT \(hybrid.low) interpolated frames \(plan.multiplier)×")
+            do {
+                let hybrid = try HybridInterpolator(size: size, low: low, multiplier: plan.multiplier)
+                self.hybrid = hybrid
+                mailbox.mutate(generation) {
+                    $0.backend = AppText(
+                        "原尺寸原帧 + VT \(hybrid.low) 中间帧 \(plan.multiplier)×",
+                        "Native originals + VT \(hybrid.low) interpolated frames \(plan.multiplier)×")
+                }
+                return
+            } catch {
+                // Gracefully fall back to native optical flow if an exotic window aspect ratio is rejected by VT.
+                if !windowHybrid2x { throw error }
             }
-            return
         }
         if plan.backend == .opticalFlow && plan.multiplier == 2 {
             let flow = try FlowInterpolator(

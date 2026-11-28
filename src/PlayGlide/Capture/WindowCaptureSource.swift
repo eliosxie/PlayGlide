@@ -74,21 +74,170 @@ struct WindowFrameGeometry: Sendable, Equatable {
     }
 }
 
+/// Tracks SCStream surface arrivals so fixed-rate sampling locks safely after each arrival without beat drops.
+struct WindowSamplingPhaseLock: Sendable {
+    let period: Double
+    let targetOffset: Double
+    let maxSlewPerTick: Double
+    private(set) var nextTick: Double?
+    private var lastObservedArrival: Double?
+    private var filteredPhaseError: Double?
+    private var hasSnapped = false
+
+    init(period: Double, targetOffset: Double? = nil, maxSlewPerTick: Double? = nil) {
+        let clampedPeriod = period.isFinite && period > 0 ? period : (1.0 / 30.0)
+        self.period = clampedPeriod
+        self.targetOffset = targetOffset ?? min(0.005, max(0.002, clampedPeriod * 0.15))
+        self.maxSlewPerTick = maxSlewPerTick ?? min(0.0015, clampedPeriod * 0.05)
+    }
+
+    mutating func observeArrival(_ arrival: Double) {
+        guard arrival.isFinite else { return }
+        if !hasSnapped || lastObservedArrival.map({ arrival - $0 > period * 2.5 || arrival < $0 }) == true {
+            hasSnapped = true
+            lastObservedArrival = arrival
+            nextTick = arrival + targetOffset
+            filteredPhaseError = 0
+            return
+        }
+        // Ignore sub-cadence compositor redraws (e.g. 60 Hz UI overlays during 30 fps video).
+        if let last = lastObservedArrival, arrival - last < period * 0.60 {
+            return
+        }
+        lastObservedArrival = arrival
+        guard let nextTick else {
+            self.nextTick = arrival + targetOffset
+            filteredPhaseError = 0
+            return
+        }
+        let rawDiff = (arrival + targetOffset) - nextTick
+        let wrapped = rawDiff - (rawDiff / period).rounded() * period
+        let previous = filteredPhaseError ?? 0
+        filteredPhaseError = previous + 0.25 * (wrapped - previous)
+    }
+
+    mutating func nextSampleTime(after now: Double) -> Double {
+        guard now.isFinite else { return 0 }
+        guard var current = nextTick else {
+            let initial = now + period
+            nextTick = initial
+            return initial
+        }
+        if current <= now {
+            var candidate = current + period
+            if let phase = filteredPhaseError {
+                let correction = min(maxSlewPerTick, max(-maxSlewPerTick, phase * 0.5))
+                candidate += correction
+                filteredPhaseError = phase - correction
+            }
+            if candidate <= now {
+                let steps = ceil((now - candidate) / period)
+                candidate += max(1, steps) * period
+            }
+            current = candidate
+            nextTick = current
+        }
+        return current
+    }
+}
+
+/// Deferred SCStream surface retained only until consumed or replaced by a newer arrival.
+struct PendingWindowSurface: @unchecked Sendable {
+    let sampleBuffer: CMSampleBuffer
+    let geometry: WindowFrameGeometry
+    let outputSize: VideoSize
+    let presentationTime: CMTime
+    let duration: CMTime
+    let sequence: Int64
+    let arrivalTime: Double
+    let epoch: UInt64
+}
+
 /// One immutable latest surface. Sampling does not manufacture new content when the window is unchanged.
 final class WindowFrameSampler: Sendable {
+    /// Align fixed-rate window sampling phase with SCStream surface arrivals and defer CoreImage rendering
+    /// until a surface is actually sampled (`PLAYGLIDE_WINDOW_PHASE_LOCK=1`).
+    static var phaseLockEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_WINDOW_PHASE_LOCK"] == "1"
+    }
+
+    private struct State {
+        var latest: VideoFrame?
+        var pending: PendingWindowSurface?
+        var phaseLock: WindowSamplingPhaseLock
+        var surfacesConverted = 0
+        var surfacesSkipped = 0
+    }
+
     let duration: CMTime
-    private let latest = Mutex<VideoFrame?>(nil)
-    init(duration: CMTime) { self.duration = duration }
-    func store(_ frame: VideoFrame) { latest.withLock { $0 = frame } }
+    let phaseLockActive: Bool
+    private let state: Mutex<State>
+
+    init(duration: CMTime, phaseLock: Bool = WindowFrameSampler.phaseLockEnabled) {
+        self.duration = duration
+        self.phaseLockActive = phaseLock
+        self.state = Mutex(State(phaseLock: WindowSamplingPhaseLock(period: duration.seconds)))
+    }
+
+    var surfacesConverted: Int { state.withLock(\.surfacesConverted) }
+    var surfacesSkipped: Int { state.withLock(\.surfacesSkipped) }
+
+    func store(_ frame: VideoFrame) {
+        state.withLock {
+            $0.latest = frame
+            $0.pending = nil
+            if phaseLockActive { $0.phaseLock.observeArrival(frame.arrivalTime) }
+        }
+    }
+
+    func storePending(_ pending: PendingWindowSurface) {
+        state.withLock {
+            if $0.pending != nil { $0.surfacesSkipped += 1 }
+            $0.pending = pending
+            if phaseLockActive { $0.phaseLock.observeArrival(pending.arrivalTime) }
+        }
+    }
+
+    func clearPending() {
+        state.withLock { $0.pending = nil }
+    }
+
+    func nextSampleTime(after now: Double) -> Double {
+        state.withLock { $0.phaseLock.nextSampleTime(after: now) }
+    }
+
+    func hasSurface() -> Bool {
+        state.withLock { $0.latest != nil || $0.pending != nil }
+    }
+
     func sample(sequence: Int64) -> VideoFrame? {
-        latest.withLock {
-            guard let frame = $0 else { return nil }
+        state.withLock {
+            guard let frame = $0.latest else { return nil }
             return VideoFrame(
                 pixelBuffer: frame.pixelBuffer,
                 presentationTime: CMTime(value: duration.value * sequence, timescale: duration.timescale),
                 duration: duration, sequence: sequence, arrivalTime: frame.arrivalTime,
                 contentRect: frame.contentRect, windowStamp: frame.windowStamp)
         }
+    }
+
+    func sample(
+        sequence: Int64,
+        convert: (PendingWindowSurface) throws -> VideoFrame
+    ) throws -> VideoFrame? {
+        let takenPending = state.withLock { state -> PendingWindowSurface? in
+            let next = state.pending
+            state.pending = nil
+            return next
+        }
+        if let takenPending {
+            let rendered = try convert(takenPending)
+            state.withLock {
+                $0.latest = rendered
+                $0.surfacesConverted += 1
+            }
+        }
+        return sample(sequence: sequence)
     }
 }
 
@@ -334,13 +483,44 @@ actor WindowCaptureSource: VideoCaptureSource {
     private func produce(
         _ sampler: WindowFrameSampler, to continuation: AsyncThrowingStream<VideoFrame, Error>.Continuation
     ) async {
+        defer { sampler.clearPending() }
         let clock = ContinuousClock()
         let start = clock.now
+        let converter = PixelConverter()
+        var pool: PixelBufferPool?
         var sequence: Int64 = 0
         var lastSampled: Int64?
+        let mailbox = self.mailbox
+        let generation = self.generation
+        let convertPending: (PendingWindowSurface) throws -> VideoFrame = { pending in
+            guard let pixel = CMSampleBufferGetImageBuffer(pending.sampleBuffer) else {
+                throw PipelineError(AppText("窗口采集没有图像缓冲", "Window capture returned no image buffer."))
+            }
+            if pool?.size != pending.outputSize {
+                pool = try PixelBufferPool(size: pending.outputSize, format: kCVPixelFormatType_32BGRA)
+            }
+            guard let pool else {
+                throw PipelineError(AppText("无法建立窗口像素池", "Could not create the window pixel buffer pool."))
+            }
+            let image = CIImage(cvPixelBuffer: pixel, options: [.applyCleanAperture: false])
+            let rendered = VideoFrame(
+                pixelBuffer: try converter.render(
+                    pending.geometry.fittedImage(image, output: pending.outputSize), pool: pool),
+                presentationTime: pending.presentationTime,
+                duration: pending.duration, sequence: pending.sequence, arrivalTime: pending.arrivalTime,
+                contentRect: pending.geometry.fittedRect(output: pending.outputSize),
+                windowStamp: WindowFrameStamp(
+                    sequence: pending.sequence, pts: pending.presentationTime, epoch: pending.epoch))
+            mailbox?.capture(rendered, generation: generation, tracksTimeline: false)
+            return rendered
+        }
         do {
             while !Task.isCancelled {
-                if let frame = sampler.sample(sequence: sequence) {
+                if sampler.phaseLockActive && !sampler.hasSurface() {
+                    try await clock.sleep(for: .milliseconds(4), tolerance: .microseconds(500))
+                    continue
+                }
+                if let frame = try sampler.sample(sequence: sequence, convert: convertPending) {
                     if let capture = frame.windowStamp {
                         mailbox?.recordWindowSample(
                             frame, generation: generation, newSurface: capture.sequence != lastSampled)
@@ -353,12 +533,19 @@ actor WindowCaptureSource: VideoCaptureSource {
                     }
                 }
                 sequence += 1
-                try await clock.sleep(
-                    until: start.advanced(by: .seconds(Double(sequence) * sampler.duration.seconds)),
-                    tolerance: .microseconds(500))
-                let elapsed = start.duration(to: clock.now)
-                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
-                sequence = max(sequence, Int64(seconds / sampler.duration.seconds))
+                if sampler.phaseLockActive {
+                    let now = mediaHostTime()
+                    let nextHost = sampler.nextSampleTime(after: now)
+                    let sleepSeconds = max(0.001, nextHost - now)
+                    try await clock.sleep(for: .seconds(sleepSeconds), tolerance: .microseconds(500))
+                } else {
+                    try await clock.sleep(
+                        until: start.advanced(by: .seconds(Double(sequence) * sampler.duration.seconds)),
+                        tolerance: .microseconds(500))
+                    let elapsed = start.duration(to: clock.now)
+                    let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                    sequence = max(sequence, Int64(seconds / sampler.duration.seconds))
+                }
             }
         } catch is CancellationError {
             // Native callbacks and all processing resources are drained by stop().
@@ -473,25 +660,38 @@ final class WindowFrameReceiver: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                 }
                 let outputSize = adaptive ? actual : size
+                let duration = CMSampleBufferGetDuration(sampleBuffer)
+                let resolvedDuration =
+                    duration.isNumeric && duration.seconds > 0 ? duration : CMTime(value: 1, timescale: 60)
+                if geometry != previousGeometry {
+                    previousGeometry = geometry
+                    mailbox.mutate(generation) { $0.windowGeometry = geometry.summary }
+                }
+                if let sampler, sampler.phaseLockActive {
+                    // Defer CoreImage rendering until the phase-locked sampler actually consumes this surface,
+                    // avoiding wasted GPU conversions for unconsumed intermediate SCStream callbacks.
+                    let pending = PendingWindowSurface(
+                        sampleBuffer: sampleBuffer, geometry: geometry, outputSize: outputSize,
+                        presentationTime: time, duration: resolvedDuration, sequence: sequence,
+                        arrivalTime: arrival, epoch: timestamps.epoch)
+                    sequence += 1
+                    sampler.storePending(pending)
+                    return
+                }
                 if pool?.size != outputSize {
                     pool = try PixelBufferPool(size: outputSize, format: kCVPixelFormatType_32BGRA)
                 }
                 guard let pool else {
                     throw PipelineError(AppText("无法建立窗口像素池", "Could not create the window pixel buffer pool."))
                 }
-                let duration = CMSampleBufferGetDuration(sampleBuffer)
                 let image = CIImage(cvPixelBuffer: pixel, options: [.applyCleanAperture: false])
                 let frame = VideoFrame(
                     // Copy into an owned surface before returning the system's reusable capture buffer.
                     pixelBuffer: try converter.render(geometry.fittedImage(image, output: outputSize), pool: pool),
                     presentationTime: time,
-                    duration: duration.isNumeric && duration.seconds > 0 ? duration : CMTime(value: 1, timescale: 60),
+                    duration: resolvedDuration,
                     sequence: sequence, arrivalTime: arrival, contentRect: geometry.fittedRect(output: outputSize),
                     windowStamp: WindowFrameStamp(sequence: sequence, pts: time, epoch: timestamps.epoch))
-                if geometry != previousGeometry {
-                    previousGeometry = geometry
-                    mailbox.mutate(generation) { $0.windowGeometry = geometry.summary }
-                }
                 sequence += 1
                 mailbox.capture(frame, generation: generation, tracksTimeline: false)
                 if let sampler {

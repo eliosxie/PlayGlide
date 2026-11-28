@@ -257,7 +257,7 @@ struct SessionInspector: View {
                         }
                     }
                     if model.draft.interpolation == .double && model.draft.backend == .automatic
-                        && model.draft.source != .window
+                        && (model.draft.source != .window || FrameProcessor.windowHybridEnabled)
                     {
                         Picker(language.text("补帧档位", "Interpolation Quality"), selection: $model.draft.hybridQuality) {
                             ForEach(HybridQuality.allCases) { Text($0.title.localized(in: language)).tag($0) }
