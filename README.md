@@ -6,7 +6,7 @@
 
 **Turn your Apple silicon Mac into a low-latency, 2× frame-interpolated display for consoles and HDMI devices.**
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+[English](README.md) · [简体中文](docs/README.zh-CN.md) · [日本語](docs/README.ja.md) · [한국어](docs/README.ko.md)
 
 [![Release](https://img.shields.io/github/v/release/eliosxie/PlayGlide?style=flat-square&color=0ea5e9&label=Release)](https://github.com/eliosxie/PlayGlide/releases) [![Platform](https://img.shields.io/badge/macOS-27%2B%20Apple%20Silicon-111827?style=flat-square&logo=apple&logoColor=white)](#requirements) [![Swift](https://img.shields.io/badge/Swift-6.0%20%7C%20Metal%203.1-f97316?style=flat-square&logo=swift&logoColor=white)](#build-from-source) [![License](https://img.shields.io/badge/License-GPL--3.0-22c55e?style=flat-square)](LICENSE)
 
@@ -137,9 +137,9 @@ PlayGlide is built around a strict-concurrency **Swift 6** actor pipeline (`Play
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.svg" />
-    <source media="(prefers-color-scheme: light)" srcset="docs/architecture-light.svg" />
-    <img alt="PlayGlide Architecture Pipeline" src="docs/architecture-light.svg" width="100%" />
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/architecture-light.svg" />
+    <img alt="PlayGlide Architecture Pipeline" src="docs/assets/architecture-light.svg" width="100%" />
   </picture>
 </p>
 

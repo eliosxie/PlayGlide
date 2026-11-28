@@ -1,14 +1,14 @@
 <div align="center">
 
-<img src="src/PlayGlide/Resources/Assets.xcassets/AppIcon.appiconset/icon_256x256.png" width="128" height="128" alt="PlayGlide 应用图标" />
+<img src="../src/PlayGlide/Resources/Assets.xcassets/AppIcon.appiconset/icon_256x256.png" width="128" height="128" alt="PlayGlide 应用图标" />
 
 # PlayGlide
 
 **将搭载 Apple 芯片的 Mac 变为低延迟、支持 2× 实时补帧的主机与 HDMI 显示器。**
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+[English](../README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md)
 
-[![Release](https://img.shields.io/github/v/release/eliosxie/PlayGlide?style=flat-square&color=0ea5e9&label=Release)](https://github.com/eliosxie/PlayGlide/releases) [![Platform](https://img.shields.io/badge/macOS-27%2B%20Apple%20Silicon-111827?style=flat-square&logo=apple&logoColor=white)](#系统要求) [![Swift](https://img.shields.io/badge/Swift-6.0%20%7C%20Metal%203.1-f97316?style=flat-square&logo=swift&logoColor=white)](#从源码构建) [![License](https://img.shields.io/badge/License-GPL--3.0-22c55e?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/eliosxie/PlayGlide?style=flat-square&color=0ea5e9&label=Release)](https://github.com/eliosxie/PlayGlide/releases) [![Platform](https://img.shields.io/badge/macOS-27%2B%20Apple%20Silicon-111827?style=flat-square&logo=apple&logoColor=white)](#系统要求) [![Swift](https://img.shields.io/badge/Swift-6.0%20%7C%20Metal%203.1-f97316?style=flat-square&logo=swift&logoColor=white)](#从源码构建) [![License](https://img.shields.io/badge/License-GPL--3.0-22c55e?style=flat-square)](../LICENSE)
 
 [核心特性](#核心特性) · [快速开始](#快速开始) · [快捷键](#快捷键) · [技术架构](#技术架构) · [从源码构建](#从源码构建) · [常见问题](#常见问题)
 
@@ -137,9 +137,9 @@ PlayGlide 采用启用完整严格并发检查的 **Swift 6** Actor 管线（`Pl
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-zh-dark.svg" />
-    <source media="(prefers-color-scheme: light)" srcset="docs/architecture-zh-light.svg" />
-    <img alt="PlayGlide 处理管线架构图" src="docs/architecture-zh-light.svg" width="100%" />
+    <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-zh-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="assets/architecture-zh-light.svg" />
+    <img alt="PlayGlide 处理管线架构图" src="assets/architecture-zh-light.svg" width="100%" />
   </picture>
 </p>
 
@@ -181,11 +181,11 @@ PlayGlide/
    git clone https://github.com/eliosxie/PlayGlide.git
    cd PlayGlide
    ```
-2. 在 Xcode 中打开 [PlayGlide.xcodeproj](PlayGlide.xcodeproj)。
+2. 在 Xcode 中打开 [PlayGlide.xcodeproj](../PlayGlide.xcodeproj)。
 3. 选择 **PlayGlide** 方案，按 **`⌘ R`** 编译运行。
 
 > [!NOTE]
-> `PlayGlide.xcodeproj` 由 [project.yml](project.yml) 生成（XcodeGen ≥ 2.46.0）。若新增或调整源码目录，请运行 `xcodegen generate` 同步更新工程文件。
+> `PlayGlide.xcodeproj` 由 [project.yml](../project.yml) 生成（XcodeGen ≥ 2.46.0）。若新增或调整源码目录，请运行 `xcodegen generate` 同步更新工程文件。
 
 ### 使用命令行构建
 
@@ -251,4 +251,4 @@ PlayGlide/
 
 ## 许可证
 
-PlayGlide 是自由软件，基于 **[GNU 通用公共许可证第 3 版（GPL-3.0）](LICENSE)** 开源。
+PlayGlide 是自由软件，基于 **[GNU 通用公共许可证第 3 版（GPL-3.0）](../LICENSE)** 开源。

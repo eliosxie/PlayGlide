@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 416" width="1020" height="416" role="img" aria-label="PLAYGLIDE パイプライン">
+  <defs>
+    <linearGradient id="canvasBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f8fafc"/>
+    </linearGradient>
+    <linearGradient id="brandBar" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#f43f5e"/>
+      <stop offset="50%" stop-color="#fb923c"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <marker id="arrowVideo" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrowAudio" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#db2777"/>
+    </marker>
+    <marker id="arrowAnchor" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#059669"/>
+    </marker>
+    <clipPath id="cardClip0"><rect x="30" y="68" width="216" height="138" rx="12"/></clipPath>
+    <clipPath id="cardClip1"><rect x="278" y="68" width="216" height="138" rx="12"/></clipPath>
+    <clipPath id="cardClip2"><rect x="526" y="68" width="216" height="138" rx="12"/></clipPath>
+    <clipPath id="cardClip3"><rect x="774" y="68" width="216" height="138" rx="12"/></clipPath>
+    <clipPath id="audioClip"><rect x="278" y="258" width="464" height="106" rx="12"/></clipPath>
+  </defs>
+  <rect x="1" y="1" width="1018" height="414" rx="18" fill="url(#canvasBg)" stroke="#e2e8f0" stroke-width="1.5"/>
+  <rect x="30" y="25" width="22" height="6" rx="3" fill="url(#brandBar)"/>
+  <text x="62" y="32" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="12" font-weight="700" letter-spacing="0.06em" fill="#0f172a">PLAYGLIDE パイプライン</text>
+  <line x1="654" y1="28" x2="672" y2="28" stroke="#94a3b8" stroke-width="2" stroke-linecap="round"/>
+  <text x="678" y="32" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11" font-weight="500" fill="#64748b">映像パイプライン</text>
+  <line x1="786" y1="28" x2="804" y2="28" stroke="#db2777" stroke-width="2" stroke-linecap="round"/>
+  <text x="810" y="32" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11" font-weight="500" fill="#64748b">HDMI 音声</text>
+  <line x1="888" y1="28" x2="906" y2="28" stroke="#059669" stroke-width="2" stroke-dasharray="4 3" stroke-linecap="round"/>
+  <text x="912" y="32" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11" font-weight="500" fill="#64748b">同期アンカー</text>
+  <rect x="30" y="71" width="216" height="138" rx="12" fill="#0f172a" opacity="0.05"/>
+  <rect x="30" y="68" width="216" height="138" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.2"/>
+  <rect x="30" y="68" width="216" height="3.5" fill="#0284c7" clip-path="url(#cardClip0)"/>
+  <rect x="46" y="84" width="104" height="20" rx="10" fill="#e0f2fe"/>
+  <text x="98.0" y="97.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="10" font-weight="700" letter-spacing="0.04em" fill="#0284c7">01 · キャプチャ</text>
+  <text x="46" y="126" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="15" font-weight="700" fill="#0f172a">USB HDMI キャプチャ</text>
+  <circle cx="50" cy="146.5" r="2" fill="#0284c7" opacity="0.85"/>
+  <text x="59" y="150" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">AVFoundation UVC 入力</text>
+  <circle cx="50" cy="165.5" r="2" fill="#0284c7" opacity="0.85"/>
+  <text x="59" y="169" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">NV12 · BGRA · HDR10</text>
+  <circle cx="50" cy="184.5" r="2" fill="#0284c7" opacity="0.85"/>
+  <text x="59" y="188" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">HDMI 音声を自動ペアリング</text>
+  <rect x="278" y="71" width="216" height="138" rx="12" fill="#0f172a" opacity="0.05"/>
+  <rect x="278" y="68" width="216" height="138" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.2"/>
+  <rect x="278" y="68" width="216" height="3.5" fill="#4f46e5" clip-path="url(#cardClip1)"/>
+  <rect x="294" y="84" width="104" height="20" rx="10" fill="#e0e7ff"/>
+  <text x="346.0" y="97.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="10" font-weight="700" letter-spacing="0.04em" fill="#4f46e5">02 · ケイデンス</text>
+  <text x="294" y="126" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="15" font-weight="700" fill="#0f172a">ケイデンス・重複検出</text>
+  <circle cx="298" cy="146.5" r="2" fill="#4f46e5" opacity="0.85"/>
+  <text x="307" y="150" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">32×18 映像シグネチャ解析</text>
+  <circle cx="298" cy="165.5" r="2" fill="#4f46e5" opacity="0.85"/>
+  <text x="307" y="169" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">60 Hz 重複フレーム除去</text>
+  <circle cx="298" cy="184.5" r="2" fill="#4f46e5" opacity="0.85"/>
+  <text x="307" y="188" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">シーン切替・ジッター補正</text>
+  <rect x="526" y="71" width="216" height="138" rx="12" fill="#0f172a" opacity="0.05"/>
+  <rect x="526" y="68" width="216" height="138" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.2"/>
+  <rect x="526" y="68" width="216" height="3.5" fill="#ea580c" clip-path="url(#cardClip2)"/>
+  <rect x="542" y="84" width="104" height="20" rx="10" fill="#ffedd5"/>
+  <text x="594.0" y="97.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="10" font-weight="700" letter-spacing="0.04em" fill="#ea580c">03 · 補間・超解像</text>
+  <text x="542" y="126" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="15" font-weight="700" fill="#0f172a">ハイブリッド補間処理</text>
+  <circle cx="546" cy="146.5" r="2" fill="#ea580c" opacity="0.85"/>
+  <text x="555" y="150" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">VT 補間 + メディアエンジン</text>
+  <circle cx="546" cy="165.5" r="2" fill="#ea580c" opacity="0.85"/>
+  <text x="555" y="169" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">静止 HUD・文字を原画保持</text>
+  <circle cx="546" cy="184.5" r="2" fill="#ea580c" opacity="0.85"/>
+  <text x="555" y="188" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">MetalFX Spatial (10-bit)</text>
+  <rect x="774" y="71" width="216" height="138" rx="12" fill="#0f172a" opacity="0.05"/>
+  <rect x="774" y="68" width="216" height="138" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.2"/>
+  <rect x="774" y="68" width="216" height="3.5" fill="#059669" clip-path="url(#cardClip3)"/>
+  <rect x="790" y="84" width="96" height="20" rx="10" fill="#d1fae5"/>
+  <text x="838.0" y="97.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="10" font-weight="700" letter-spacing="0.04em" fill="#059669">04 · 描画出力</text>
+  <text x="790" y="126" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="15" font-weight="700" fill="#0f172a">Direct Metal 表示</text>
+  <circle cx="794" cy="146.5" r="2" fill="#059669" opacity="0.85"/>
+  <text x="803" y="150" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">CAMetalDisplayLink 駆動</text>
+  <circle cx="794" cy="165.5" r="2" fill="#059669" opacity="0.85"/>
+  <text x="803" y="169" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">遅延選択タイムライン制御</text>
+  <circle cx="794" cy="184.5" r="2" fill="#059669" opacity="0.85"/>
+  <text x="803" y="188" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.2" fill="#475569">HDR10 PQ · EDR · 分割比較</text>
+  <line x1="246" y1="137" x2="275" y2="137" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#arrowVideo)"/>
+  <line x1="494" y1="137" x2="523" y2="137" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#arrowVideo)"/>
+  <line x1="742" y1="137" x2="771" y2="137" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#arrowVideo)"/>
+  <rect x="278" y="261" width="464" height="106" rx="12" fill="#0f172a" opacity="0.05"/>
+  <rect x="278" y="258" width="464" height="106" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.2"/>
+  <rect x="278" y="258" width="464" height="3.5" fill="#db2777" clip-path="url(#audioClip)"/>
+  <rect x="296" y="274" width="74" height="20" rx="10" fill="#fce7f3"/>
+  <text x="333.0" y="287.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="10" font-weight="700" letter-spacing="0.04em" fill="#db2777">音声同期</text>
+  <text x="382" y="289" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="15" font-weight="700" fill="#0f172a">CoreAudio 表示タイミング同期</text>
+  <text x="296" y="320" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.5" fill="#475569">HDMI 音声を自動ペアリング  ·  任意の CoreAudio 出力デバイスに対応</text>
+  <text x="296" y="342" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11.5" fill="#475569">滑らかなクロック微調整  ·  -40 ms ～ +150 ms リアルタイム調整</text>
+  <path d="M 138 206 L 138 297 Q 138 311 152 311 L 275 311" fill="none" stroke="#db2777" stroke-width="1.8" marker-end="url(#arrowAudio)"/>
+  <rect x="75" y="232" width="126" height="22" rx="11" fill="#f1f5f9" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="138" y="246.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11" font-weight="600" fill="#db2777">HDMI PCM 音声</text>
+  <path d="M 882 206 L 882 297 Q 882 311 868 311 L 745 311" fill="none" stroke="#059669" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arrowAnchor)"/>
+  <rect x="813" y="232" width="138" height="22" rx="11" fill="#f1f5f9" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="882" y="246.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11" font-weight="600" fill="#059669">表示タイムスタンプ</text>
+  <text x="510" y="394" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', sans-serif" font-size="11" font-weight="500" fill="#64748b">Swift 6 厳格並行性 Actor（.userInteractive QoS）   ·   プリコンパイル済み Metal 3.1 シェーダー   ·   ゼロコピー CVPixelBuffer</text>
+</svg>
