@@ -399,7 +399,8 @@ struct ContentCadence: Sendable {
                 slipFramesRemaining = 0
                 harmonicSixtyOffset = .zero
                 phaseSlipOffset = .zero
-            } else if adaptiveHarmonicRate, nominal < tick * 1.5, gapSeconds >= tick * 1.5,
+            } else if adaptiveHarmonicRate, Self.isSixtyHzTransport(tick), nominal < tick * 1.5,
+                gapSeconds >= tick * 1.5,
                 interactiveSixtyGuard || Self.spansWholeTransportFrames(gapSeconds, tick: tick)
             {
                 // In 60 fps passthrough (e.g. an animated menu or unlocked 45-60 fps gameplay), USB burst
