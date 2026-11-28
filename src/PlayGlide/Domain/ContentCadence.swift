@@ -107,6 +107,23 @@ struct ContentCadence: Sendable {
         (1.0 / 61.0...1.0 / 59.0).contains(tick)
     }
 
+    static func isOneTwentyHzTransport(_ tick: Double) -> Bool {
+        (1.0 / 121.0...1.0 / 119.0).contains(tick)
+    }
+
+    /// Harmonic content cadences carried inside a 120 Hz / 119.88 Hz container:
+    /// 1 tick = 120 fps, 2 ticks = 60 fps, 3 ticks = 40 fps (PS5 Balanced Mode), 4 ticks = 30 fps.
+    static func isHarmonicIn120Hz(_ gap: Double, tick: Double) -> Bool {
+        guard isOneTwentyHzTransport(tick) else { return false }
+        let ticks = (gap / tick).rounded()
+        return (1...4).contains(Int(ticks)) && abs(gap - ticks * tick) <= max(0.0015, tick * 0.15)
+    }
+
+    static func isFortyFPSIn120Hz(_ gap: Double, tick: Double) -> Bool {
+        guard isOneTwentyHzTransport(tick) else { return false }
+        return abs(gap - 3 * tick) <= max(0.0015, tick * 0.15)
+    }
+
     private static func isHarmonicThirtyOrSixty(_ gap: Double, tick: Double) -> Bool {
         guard isSixtyHzTransport(tick) else { return false }
         let ticks = (gap / tick).rounded()
@@ -173,6 +190,7 @@ struct ContentCadence: Sendable {
     private let adaptiveHarmonicRate: Bool
     private let interactiveSixtyGuard: Bool
     private let slipAwareThirtyReturn: Bool
+    private let highRefresh120Hz: Bool
     private var nominalPeriod: CMTime?
     private var pendingHitchGap: Double?
     private var pendingHitchRemaining = 0
@@ -205,7 +223,8 @@ struct ContentCadence: Sendable {
         toleratingWindowJitter: Bool = false, preservingRepeatedTransport: Bool = false,
         toleratingContentHitches: Bool = false, adaptiveHarmonicRate: Bool = false,
         interactiveSixtyGuard: Bool = ContentCadence.interactiveSixtyGuardEnabled,
-        slipAwareThirtyReturn: Bool = ContentCadence.slipAwareThirtyReturnEnabled
+        slipAwareThirtyReturn: Bool = ContentCadence.slipAwareThirtyReturnEnabled,
+        highRefresh120Hz: Bool = false
     ) {
         windowCadence = toleratingWindowJitter ? WindowCadence() : nil
         self.preservingRepeatedTransport = preservingRepeatedTransport
@@ -213,6 +232,7 @@ struct ContentCadence: Sendable {
         self.adaptiveHarmonicRate = adaptiveHarmonicRate
         self.interactiveSixtyGuard = interactiveSixtyGuard
         self.slipAwareThirtyReturn = slipAwareThirtyReturn
+        self.highRefresh120Hz = highRefresh120Hz
     }
 
     mutating func accept(
@@ -453,6 +473,24 @@ struct ContentCadence: Sendable {
                 let completesPendingHitch =
                     slipAwareThirtyReturn
                     && (pendingHitchGap.map { abs($0 + gapSeconds - 2 * nominal) <= tolerance } ?? false)
+                if highRefresh120Hz, !completesPendingHitch,
+                    Self.isHarmonicIn120Hz(nominal, tick: tick), Self.isHarmonicIn120Hz(gapSeconds, tick: tick)
+                {
+                    // Switching between 120 / 60 / 40 / 30 fps inside a 120 Hz container shares the same
+                    // 120 Hz output grid; preserve references and learned readiness across menu/gameplay changes.
+                    harmonicSixtyOffset = .zero
+                    phaseSlipOffset = .zero
+                    pendingHitchGap = nil
+                    pendingHitchRemaining = 0
+                    pendingThirtyConfirmation = 0
+                    pendingThirtySlipTicks = 0
+                    previousTime = time
+                    previousContentArrival = arrival
+                    lastAcceptedGap = gapSeconds
+                    self.nominalPeriod = gap
+                    interval = gap
+                    return .keep(reset: false, interval: gap)
+                }
                 if adaptiveHarmonicRate, !completesPendingHitch, Self.isHarmonicThirtyOrSixty(nominal, tick: tick),
                     Self.isHarmonicThirtyOrSixty(gapSeconds, tick: tick)
                 {
@@ -551,9 +589,13 @@ struct ContentCadence: Sendable {
         if !keepSixtyOffset { harmonicSixtyOffset = .zero }
         phaseSlipOffset = keepSixtyOffset ? harmonicSixtyOffset : .zero
         let harmonicTransition =
-            adaptiveHarmonicRate && windowCadence == nil && !inputSkipped && !sceneCut && cadenceChanged
-            && nominalGap.map { Self.isHarmonicThirtyOrSixty($0, tick: tick) } == true
-            && Self.isHarmonicThirtyOrSixty(gapSeconds, tick: tick)
+            windowCadence == nil && !inputSkipped && !sceneCut && cadenceChanged
+            && ((adaptiveHarmonicRate
+                && nominalGap.map { Self.isHarmonicThirtyOrSixty($0, tick: tick) } == true
+                && Self.isHarmonicThirtyOrSixty(gapSeconds, tick: tick))
+                || (highRefresh120Hz
+                    && nominalGap.map { Self.isHarmonicIn120Hz($0, tick: tick) } == true
+                    && Self.isHarmonicIn120Hz(gapSeconds, tick: tick)))
         let resetHistory =
             windowCadence?.requiresReset(after: gap, sceneCut: sceneCut) ?? (cadenceChanged && !harmonicTransition)
         previousTime = time
@@ -585,7 +627,8 @@ struct ContentCadence: Sendable {
         self = ContentCadence(
             toleratingWindowJitter: windowCadence != nil, preservingRepeatedTransport: preservingRepeatedTransport,
             toleratingContentHitches: toleratingContentHitches, adaptiveHarmonicRate: adaptiveHarmonicRate,
-            interactiveSixtyGuard: interactiveSixtyGuard)
+            interactiveSixtyGuard: interactiveSixtyGuard, slipAwareThirtyReturn: slipAwareThirtyReturn,
+            highRefresh120Hz: highRefresh120Hz)
     }
 }
 

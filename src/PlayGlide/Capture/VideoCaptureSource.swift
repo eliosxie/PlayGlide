@@ -13,12 +13,13 @@ struct CaptureFormatDescriptor: Identifiable, Sendable, Equatable {
     let subtype: UInt32
     let duration: CMTime
     var fps: Double { 1 / duration.seconds }
-    var isCompressed: Bool {
+    static func isCompressed(subtype: UInt32) -> Bool {
         switch fourCC(subtype) {
         case "dmb1", "MJPG", "mjpg", "jpeg", "mjpa", "mjpb", "avc1", "avc3", "hvc1", "hev1": true
         default: false
         }
     }
+    var isCompressed: Bool { Self.isCompressed(subtype: subtype) }
     var title: AppText {
         let format = "\(size) · \(fps.formatted(.number.precision(.fractionLength(0...2)))) fps · \(fourCC(subtype))"
         guard isCompressed else { return AppText(verbatim: format) }

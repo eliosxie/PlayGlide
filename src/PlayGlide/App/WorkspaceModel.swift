@@ -197,6 +197,11 @@ final class WorkspaceModel: ObservableObject {
             mode = language.text("直通", "Passthrough")
         } else if statistics.fgHeld {
             mode = language.text("过载直出", "Passthrough Under Load")
+        } else if settings.interpolation != .off,
+            statistics.passthroughFrames > 0,
+            statistics.contentInterval > 0, statistics.contentInterval < 1.0 / 90.0
+        {
+            mode = language.text("1× 原生 120fps", "1× Native 120 fps")
         } else if settings.interpolation == .double,
             statistics.passthroughFrames > 0,
             statistics.contentInterval > 0, statistics.contentInterval < 1.0 / 45.0

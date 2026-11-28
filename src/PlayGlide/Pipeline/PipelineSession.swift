@@ -34,6 +34,7 @@ actor PipelineSession {
     let mailbox: FrameMailbox
     nonisolated let usesUserInteractiveQueue: Bool
     private let resetsOnColorModeChange: Bool
+    private let allow120HzCapture: Bool
     private let executorQueue: DispatchSerialQueue
     private let source: any VideoCaptureSource
     private let processor: FrameProcessor
@@ -56,13 +57,16 @@ actor PipelineSession {
             && (settings.contentMode == .automatic || ContentCadence.interactiveSixtyGuardEnabled)
     }
 
-    private static func makeCadence(for settings: SessionDraft, adaptiveHarmonicRate: Bool) -> ContentCadence {
+    private static func makeCadence(
+        for settings: SessionDraft, adaptiveHarmonicRate: Bool, highRefresh120Hz: Bool = false
+    ) -> ContentCadence {
         ContentCadence(
             toleratingWindowJitter: settings.usesStableWindowCadence,
             preservingRepeatedTransport: settings.preservesRepeatedTransportCadence,
             toleratingContentHitches: settings.source != .window
-                && (settings.contentMode == .automatic || adaptiveHarmonicRate),
-            adaptiveHarmonicRate: adaptiveHarmonicRate)
+                && (settings.contentMode == .automatic || adaptiveHarmonicRate || highRefresh120Hz),
+            adaptiveHarmonicRate: adaptiveHarmonicRate,
+            highRefresh120Hz: highRefresh120Hz && settings.source != .window)
     }
 
     init(
@@ -71,6 +75,7 @@ actor PipelineSession {
         performanceHoldSettle: Double = PerformanceHold.settleSeconds,
         useUserInteractiveQueue: Bool = PipelineSession.userInteractiveQoSEnabled,
         resetsOnColorModeChange: Bool = PipelineSession.colorModeResetEnabled,
+        allow120HzCapture: Bool = CaptureCatalog.allow120HzCaptureEnabled,
         customSource: (any VideoCaptureSource)? = nil
     ) throws {
         guard settings.isAvailableInBuild else {
@@ -82,6 +87,7 @@ actor PipelineSession {
         self.mailbox = mailbox
         self.usesUserInteractiveQueue = useUserInteractiveQueue
         self.resetsOnColorModeChange = resetsOnColorModeChange
+        self.allow120HzCapture = allow120HzCapture
         self.executorQueue = DispatchSerialQueue(
             label: "PlayGlide.pipeline.session",
             qos: useUserInteractiveQueue ? .userInteractive : .unspecified)
@@ -119,7 +125,8 @@ actor PipelineSession {
         processor = FrameProcessor(
             settings: settings, generation: generation, mailbox: mailbox,
             preferFlowTextureViews: preferFlowTextureViews,
-            useUserInteractiveQueue: useUserInteractiveQueue
+            useUserInteractiveQueue: useUserInteractiveQueue,
+            allow120HzCapture: allow120HzCapture
         )
         mailbox.configureAudioSynchronization(
             generation, enabled: settings.source == .captureCard && settings.audioEnabled)
@@ -138,7 +145,8 @@ actor PipelineSession {
         let detector = ContentDetector()
         var activeSettings = settings
         var adaptiveHarmonicRate = Self.usesAdaptiveHarmonicRate(for: activeSettings)
-        var cadence = Self.makeCadence(for: activeSettings, adaptiveHarmonicRate: adaptiveHarmonicRate)
+        var cadence = Self.makeCadence(
+            for: activeSettings, adaptiveHarmonicRate: adaptiveHarmonicRate, highRefresh120Hz: allow120HzCapture)
         var fastContentRun = 0
         var previousSize: VideoSize?
         var windowEpoch: UInt64?
@@ -175,7 +183,9 @@ actor PipelineSession {
                             || previousSettings.presentationMode != next.presentationMode
                         if processingChanged {
                             detector.reset()
-                            cadence = Self.makeCadence(for: next, adaptiveHarmonicRate: adaptiveHarmonicRate)
+                            cadence = Self.makeCadence(
+                                for: next, adaptiveHarmonicRate: adaptiveHarmonicRate,
+                                highRefresh120Hz: allow120HzCapture)
                             fastContentRun = 0
                             duplicateWork = 0
                             mailbox.flush(
@@ -280,11 +290,15 @@ actor PipelineSession {
                         mailbox.enqueue(output)
                     }
                     let holdInterval = (cadence.schedulingInterval ?? interval).seconds
-                    let passthroughSixty =
-                        adaptiveHarmonicRate && ContentCadence.isSixtyHzTransport(frame.duration.seconds)
-                        && (holdInterval < frame.duration.seconds * 1.45
-                            || interval.seconds < frame.duration.seconds * 1.45)
-                    if let hold, !passthroughSixty || cadence.prewarmingReturnToThirty,
+                    let passthroughNativeRate =
+                        (adaptiveHarmonicRate && ContentCadence.isSixtyHzTransport(frame.duration.seconds)
+                            && !(allow120HzCapture && activeSettings.hybridQuality == .fast720)
+                            && (holdInterval < frame.duration.seconds * 1.45
+                                || interval.seconds < frame.duration.seconds * 1.45))
+                        || (allow120HzCapture && ContentCadence.isOneTwentyHzTransport(frame.duration.seconds)
+                            && (holdInterval < frame.duration.seconds * 1.45
+                                || interval.seconds < frame.duration.seconds * 1.45))
+                    if let hold, !passthroughNativeRate || cadence.prewarmingReturnToThirty,
                         mailbox.presentationSurfaceIsStable(
                             generation, for: performanceHoldSettle, now: mediaHostTime())
                     {

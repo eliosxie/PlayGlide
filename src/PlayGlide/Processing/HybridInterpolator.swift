@@ -231,11 +231,11 @@ final class HybridInterpolator {
         size: VideoSize, low requested: VideoSize? = nil, multiplier: Int = 2, detailMode: DetailMode = .configured,
         bidirectionalMotion: Bool = ProcessInfo.processInfo.environment["PLAYGLIDE_HYBRID_BIDIR"] != "0"
     ) throws {
-        let clampedMultiplier = multiplier == 4 ? 4 : 2
+        let clampedMultiplier = (multiplier == 3 || multiplier == 4) ? multiplier : 2
         guard let low = requested ?? Self.lowSize(for: size),
             let configuration = VTLowLatencyFrameInterpolationConfiguration(
                 frameWidth: low.width, frameHeight: low.height,
-                numberOfInterpolatedFrames: clampedMultiplier == 4 ? 2 : 1),
+                numberOfInterpolatedFrames: clampedMultiplier > 2 ? 2 : 1),
             let format = configuration.supportedPixelFormats.first,
             format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         else {

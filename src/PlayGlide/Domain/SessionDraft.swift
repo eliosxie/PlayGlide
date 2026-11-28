@@ -36,7 +36,9 @@ struct SessionDraft: Sendable, Equatable {
 
     var isAvailableInBuild: Bool {
         BuildFeatures.developmentTools
-            || (source == .captureCard && interpolation != .quadruple && backend == .automatic)
+            || (source == .captureCard && backend == .automatic
+                && (interpolation == .off || interpolation == .double
+                    || (interpolation == .triple && CaptureCatalog.allow120HzCaptureEnabled)))
     }
 
     var usesStableWindowCadence: Bool {
@@ -189,7 +191,11 @@ struct SessionPreferences: Sendable, Equatable, Codable {
         draft.audioEnabled = audioEnabled
         draft.audioDeviceID = audioDeviceID
         draft.contentMode = contentMode
-        draft.interpolation = !BuildFeatures.developmentTools && interpolation == .quadruple ? .double : interpolation
+        let unsupportedMultiplier =
+            !BuildFeatures.developmentTools
+            && (interpolation == .quadruple
+                || (interpolation == .triple && !CaptureCatalog.allow120HzCaptureEnabled))
+        draft.interpolation = unsupportedMultiplier ? .double : interpolation
         draft.backend = BuildFeatures.developmentTools ? backend : .automatic
         draft.hybridQuality = hybridQuality
         draft.upscaling = upscaling
@@ -227,6 +233,7 @@ enum PresentationMode: String, CaseIterable, Identifiable, Sendable, Codable {
     ) -> Double {
         guard self == .responsive else { return 0.08 }
         if multiplier >= 4 { return 0.03 }
+        if multiplier == 3 { return 0.025 }
         if multiplier <= 1, fastPassthrough { return 0.008 }
         return 0.022
     }
@@ -422,13 +429,24 @@ enum ContentMode: String, CaseIterable, Identifiable, Sendable, Codable {
 enum InterpolationStrategy: Int, CaseIterable, Identifiable, Sendable, Codable {
     case off = 1
     case double = 2
+    case triple = 3
     case quadruple = 4
-    static var availableModes: [Self] { BuildFeatures.developmentTools ? allCases : [.off, .double] }
+    static func availableModes(
+        developmentTools: Bool = BuildFeatures.developmentTools,
+        allow120Hz: Bool = CaptureCatalog.allow120HzCaptureEnabled
+    ) -> [Self] {
+        if developmentTools {
+            return allow120Hz ? [.off, .double, .triple, .quadruple] : [.off, .double, .quadruple]
+        }
+        return allow120Hz ? [.off, .double, .triple] : [.off, .double]
+    }
+    static var availableModes: [Self] { availableModes() }
     var id: Self { self }
     var title: AppText {
         switch self {
         case .off: AppText("关闭 · 原始节奏", "Off · Original Cadence")
-        case .double: "2× · 30 → 60"
+        case .double: CaptureCatalog.allow120HzCaptureEnabled ? "2× · 30→60 / 60→120" : "2× · 30 → 60"
+        case .triple: "3× · 40 → 120"
         case .quadruple: "4× · 30 → 120"
         }
     }

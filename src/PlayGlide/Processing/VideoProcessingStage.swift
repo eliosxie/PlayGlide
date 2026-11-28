@@ -117,6 +117,7 @@ actor FrameProcessor: VideoProcessingStage {
     private let executorQueue: DispatchSerialQueue
     private let preferFlowTextureViews: Bool
     private let preservesFlowHDR10: Bool
+    private let allow120HzCapture: Bool
     private var usesStableWindowCadence: Bool
     private var plan: ProcessingPlan?
     private var processor: VTFrameProcessor?
@@ -148,7 +149,8 @@ actor FrameProcessor: VideoProcessingStage {
     init(
         settings: SessionDraft, generation: UUID, mailbox: FrameMailbox, preferFlowTextureViews: Bool = true,
         useUserInteractiveQueue: Bool = PipelineSession.userInteractiveQoSEnabled,
-        preservesFlowHDR10: Bool = FlowInterpolator.hdrPassthroughEnabled
+        preservesFlowHDR10: Bool = FlowInterpolator.hdrPassthroughEnabled,
+        allow120HzCapture: Bool = CaptureCatalog.allow120HzCaptureEnabled
     ) {
         self.settings = settings
         self.generation = generation
@@ -159,6 +161,7 @@ actor FrameProcessor: VideoProcessingStage {
             qos: useUserInteractiveQueue ? .userInteractive : .unspecified)
         self.preferFlowTextureViews = preferFlowTextureViews
         self.preservesFlowHDR10 = preservesFlowHDR10
+        self.allow120HzCapture = allow120HzCapture
         usesStableWindowCadence = settings.usesStableWindowCadence
     }
 
@@ -180,13 +183,13 @@ actor FrameProcessor: VideoProcessingStage {
         let hybrid2x =
             plan.backend == .opticalFlow && plan.multiplier == 2 && hybridAllowed && settings.backend == .automatic
             && settings.source != .window
-        let hybrid4x =
-            plan.backend == .frameRateConversion && plan.multiplier == 4 && hybridAllowed
+        let hybridHighRefresh =
+            plan.backend == .frameRateConversion && (plan.multiplier == 3 || plan.multiplier == 4) && hybridAllowed
             && settings.backend == .automatic && settings.source != .window
             && (size == InputPreset.uhd4K.size || size == InputPreset.qhd1440.size)
-        if hybrid2x || hybrid4x,
+        if hybrid2x || hybridHighRefresh,
             let low = HybridInterpolator.lowSize(
-                for: size, maxHeight: plan.multiplier == 4 ? 720 : settings.hybridQuality.maxLowHeight)
+                for: size, maxHeight: plan.multiplier >= 3 ? 720 : settings.hybridQuality.maxLowHeight)
         {
             let hybrid = try HybridInterpolator(size: size, low: low, multiplier: plan.multiplier)
             self.hybrid = hybrid
@@ -221,7 +224,7 @@ actor FrameProcessor: VideoProcessingStage {
             guard
                 let config = VTLowLatencyFrameInterpolationConfiguration(
                     frameWidth: size.width, frameHeight: size.height,
-                    numberOfInterpolatedFrames: plan.multiplier == 4 ? 2 : 1)
+                    numberOfInterpolatedFrames: plan.multiplier > 2 ? 2 : 1)
             else {
                 throw PipelineError(
                     AppText(
@@ -695,16 +698,55 @@ actor FrameProcessor: VideoProcessingStage {
         }
     }
 
+    static func shouldPassthroughHighRefresh(
+        deltaSeconds: Double, schedulingSeconds: Double?, transportSeconds: Double,
+        multiplier: Int, inputSize: VideoSize, source: InputSource, contentMode: ContentMode,
+        hybridQuality: HybridQuality,
+        dynamicCadenceCap: Bool = ContentCadence.dynamicCadenceCapEnabled,
+        interactiveSixtyGuard: Bool = ContentCadence.interactiveSixtyGuardEnabled,
+        allow120HzCapture: Bool = CaptureCatalog.allow120HzCaptureEnabled
+    ) -> Bool {
+        guard multiplier > 1, source != .window else { return false }
+        let effectiveDelta = min(deltaSeconds, schedulingSeconds ?? deltaSeconds)
+        if allow120HzCapture && ContentCadence.isOneTwentyHzTransport(transportSeconds) {
+            // Inside a 120 Hz container, never interpolate above 120 fps:
+            // - 120 fps (1 tick): always 1× passthrough
+            // - 60 fps (2 ticks): 2× runs 60→120; 3×/4× take 1× passthrough
+            // - 40 fps (3 ticks): 3× runs 40→120; 4× takes 1× passthrough
+            if effectiveDelta < transportSeconds * 1.45 { return true }
+            let projectedFPS = Double(multiplier) / max(0.001, effectiveDelta)
+            return projectedFPS > 125.0
+        }
+        if allow120HzCapture && multiplier == 3 && ContentCadence.isSixtyHzTransport(transportSeconds) {
+            return effectiveDelta < 1.0 / 45.0
+        }
+        guard dynamicCadenceCap, multiplier == 2,
+            contentMode == .automatic || interactiveSixtyGuard
+        else { return false }
+        guard ContentCadence.isSixtyHzTransport(transportSeconds) else { return false }
+        let isSixtyFPSContent =
+            deltaSeconds < transportSeconds * 1.45
+            || (schedulingSeconds.map { $0 < transportSeconds * 1.45 } ?? false)
+        guard isSixtyFPSContent else { return false }
+        // With 120 Hz capture/interpolation enabled, allow 60→120 (2×) on fast720 or <= 1080p inputs
+        // where ANE low-latency interpolation stays well within the 8.33 ms 120 Hz frame budget.
+        if allow120HzCapture
+            && (hybridQuality == .fast720 || inputSize.pixels <= InputPreset.hd1080.size.pixels)
+        {
+            return false
+        }
+        return true
+    }
+
     private func shouldPassthroughHarmonicSixty(
         delta: CMTime, schedulingInterval: CMTime?, transportDuration: CMTime, plan: ProcessingPlan
     ) -> Bool {
-        guard dynamicCadenceCapEnabled, plan.multiplier == 2,
-            settings.source != .window,
-            settings.contentMode == .automatic || interactiveSixtyGuardEnabled
-        else { return false }
-        let tick = transportDuration.seconds
-        guard ContentCadence.isSixtyHzTransport(tick) else { return false }
-        return delta.seconds < tick * 1.45 || (schedulingInterval.map { $0.seconds < tick * 1.45 } ?? false)
+        Self.shouldPassthroughHighRefresh(
+            deltaSeconds: delta.seconds, schedulingSeconds: schedulingInterval?.seconds,
+            transportSeconds: transportDuration.seconds, multiplier: plan.multiplier,
+            inputSize: plan.input, source: settings.source, contentMode: settings.contentMode,
+            hybridQuality: settings.hybridQuality, dynamicCadenceCap: dynamicCadenceCapEnabled,
+            interactiveSixtyGuard: interactiveSixtyGuardEnabled, allow120HzCapture: allow120HzCapture)
     }
 
     private func emitPassthrough(

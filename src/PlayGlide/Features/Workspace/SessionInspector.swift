@@ -263,7 +263,7 @@ struct SessionInspector: View {
                             ForEach(HybridQuality.allCases) { Text($0.title.localized(in: language)).tag($0) }
                         }
                     }
-                    if model.draft.interpolation == .double {
+                    if model.draft.interpolation != .off {
                         Picker(language.text("呈现策略", "Presentation Mode"), selection: $model.draft.presentationMode) {
                             ForEach(PresentationMode.allCases) { Text($0.title.localized(in: language)).tag($0) }
                         }

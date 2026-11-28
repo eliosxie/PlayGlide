@@ -201,12 +201,23 @@ actor CaptureCatalog {
 
     static let frameRateMatchTolerance = 0.002
 
+    /// Expose uncompressed 120 Hz UVC capture modes (e.g. 1440p120 / 1080p120 on Elgato 4K X) and unlock
+    /// high-refresh 60→120 (2×) and 40→120 (3×) interpolation pipelines (`PLAYGLIDE_ALLOW_120HZ_CAPTURE=1`).
+    static var allow120HzCaptureEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYGLIDE_ALLOW_120HZ_CAPTURE"] == "1"
+    }
+
+    static func maximumFrameRate(allow120Hz: Bool = CaptureCatalog.allow120HzCaptureEnabled) -> Double {
+        allow120Hz ? 120.1 : 60.01
+    }
+
     static func supports(
-        duration: CMTime, in ranges: [(minFPS: Double, maxFPS: Double, minDuration: CMTime, maxDuration: CMTime)]
+        duration: CMTime, in ranges: [(minFPS: Double, maxFPS: Double, minDuration: CMTime, maxDuration: CMTime)],
+        allow120Hz: Bool = CaptureCatalog.allow120HzCaptureEnabled
     ) -> Bool {
         guard duration.isNumeric, duration.seconds > 0 else { return false }
         let fps = 1 / duration.seconds
-        guard fps.isFinite, fps > 0, fps <= 60.01 else { return false }
+        guard fps.isFinite, fps > 0, fps <= maximumFrameRate(allow120Hz: allow120Hz) else { return false }
         return ranges.contains { range in
             (range.minDuration.isNumeric && range.maxDuration.isNumeric
                 && CMTimeCompare(duration, range.minDuration) >= 0 && CMTimeCompare(duration, range.maxDuration) <= 0)
@@ -214,7 +225,7 @@ actor CaptureCatalog {
         }
     }
 
-    func devices() -> [CaptureDeviceDescriptor] {
+    func devices(allow120Hz: Bool = CaptureCatalog.allow120HzCaptureEnabled) -> [CaptureDeviceDescriptor] {
         AVCaptureDevice.DiscoverySession(deviceTypes: [.external], mediaType: .video, position: .unspecified)
             .devices.map { device in
                 var choices: [CaptureFormatDescriptor] = []
@@ -225,6 +236,8 @@ actor CaptureCatalog {
                     else { continue }
                     let size = VideoSize(width: Int(dimensions.width), height: Int(dimensions.height))
                     let subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription)
+                    let formatAllow120Hz = allow120Hz && !CaptureFormatDescriptor.isCompressed(subtype: subtype)
+                    let maxFPS = Self.maximumFrameRate(allow120Hz: formatAllow120Hz)
                     let ranges = format.videoSupportedFrameRateRanges.map {
                         (
                             minFPS: $0.minFrameRate, maxFPS: $0.maxFrameRate,
@@ -233,15 +246,22 @@ actor CaptureCatalog {
                     }
                     // Prefer the driver's exact discrete durations before standard candidates for continuous ranges.
                     var durations: [CMTime] = []
-                    for range in format.videoSupportedFrameRateRanges where range.maxFrameRate <= 60.01 {
+                    for range in format.videoSupportedFrameRateRanges where range.maxFrameRate <= maxFPS {
                         durations.append(range.minFrameDuration)
                     }
                     durations.append(contentsOf: [
                         CMTime(value: 1, timescale: 30), CMTime(value: 1, timescale: 60),
                         CMTime(value: 1001, timescale: 30000), CMTime(value: 1001, timescale: 60000),
                     ])
+                    if formatAllow120Hz {
+                        durations.append(contentsOf: [
+                            CMTime(value: 1, timescale: 120), CMTime(value: 1001, timescale: 120000),
+                        ])
+                    }
                     for duration in durations {
-                        guard Self.supports(duration: duration, in: ranges) else { continue }
+                        guard Self.supports(duration: duration, in: ranges, allow120Hz: formatAllow120Hz) else {
+                            continue
+                        }
                         let id = "\(index):\(duration.value):\(duration.timescale)"
                         if !choices.contains(where: {
                             $0.index == index && abs($0.duration.seconds - duration.seconds) < 0.000001
@@ -347,7 +367,8 @@ actor AVFoundationCaptureSource: VideoCaptureSource {
                 minDuration: $0.minFrameDuration, maxDuration: $0.maxFrameDuration
             )
         }
-        guard CaptureCatalog.supports(duration: format.duration, in: ranges)
+        let formatAllow120Hz = CaptureCatalog.allow120HzCaptureEnabled && !format.isCompressed
+        guard CaptureCatalog.supports(duration: format.duration, in: ranges, allow120Hz: formatAllow120Hz)
         else { throw PipelineError(AppText("设备不支持所选帧时长", "The device does not support the selected frame duration.")) }
         var selectedAudioDevice: AVCaptureDevice?
         if audioEnabled {
