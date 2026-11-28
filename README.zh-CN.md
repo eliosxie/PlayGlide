@@ -135,16 +135,13 @@
 
 PlayGlide 采用启用完整严格并发检查的 **Swift 6** Actor 管线（`PlayGlide.pipeline.session` 与 `PlayGlide.frame.processor` 运行于 `.userInteractive` 队列），结合自定义 **Metal 3.1** 计算与渲染着色器构建。
 
-```mermaid
-flowchart LR
-    A["USB HDMI 采集卡\nAVFoundation UVC + 音频"] --> B["ContentDetector & ContentCadence\n32×18 画面签名 · 重复帧识别 · 抖动补偿"]
-    B --> C["FrameProcessor\n混合 VT + 媒体引擎运动估计\n原生原画细节保留"]
-    C --> D["MetalFX Spatial\n可选 10-bit 空间超分"]
-    D --> E["FrameMailbox & FrameTimeline\n延迟选帧时间轴队列"]
-    E --> F["MetalPreviewSurface\nCAMetalDisplayLink 直接渲染\nHDR10 PQ / EDR 与原画对照"]
-    A --> G["CoreAudio 同步引擎\n锚定呈现时刻的速率微调与偏移"]
-    F -. "实际呈现时间戳锚点" .-> G
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-zh-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="docs/architecture-zh-light.svg" />
+    <img alt="PlayGlide 处理管线架构图" src="docs/architecture-zh-light.svg" width="100%" />
+  </picture>
+</p>
 
 ### 目录结构
 

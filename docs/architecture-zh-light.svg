@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 416" width="1020" height="416" role="img" aria-label="PLAYGLIDE 处理管线">
+  <defs>
+    <linearGradient id="canvasBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f8fafc"/>
+    </linearGradient>
+    <linearGradient id="brandBar" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#f43f5e"/>
+      <stop offset="50%" stop-color="#fb923c"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <marker id="arrowVideo" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrowAudio" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#db2777"/>
+    </marker>
+    <marker id="arrowAnchor" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#059669"/>
+    </marker>
+    <clipPath id="cardClip0"><rect x="30" y="68" width="216" height="138" rx="12"/></clipPath>
+    <clipPath id="cardClip1"><rect x="278" y="68" width="216" height="138" rx="12"/></clipPath>
+    <clipPath id="cardClip2"><rect x="526" y="68" width="216" height="138" rx="12"/></clipPath>
+    <clipPath id="cardClip3"><rect x="774" y="68" width="216" height="138" rx="12"/></clipPath>
+    <clipPath id="audioClip"><rect x="278" y="258" width="464" height="106" rx="12"/></clipPath>
+  </defs>
+  <rect x="1" y="1" width="1018" height="414" rx="18" fill="url(#canvasBg)" stroke="#e2e8f0" stroke-width="1.5"/>
+  <rect x="30" y="25" width="22" height="6" rx="3" fill="url(#brandBar)"/>
+  <text x="62" y="32" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="12" font-weight="700" letter-spacing="0.08em" fill="#0f172a">PLAYGLIDE 处理管线</text>
+  <line x1="738" y1="28" x2="756" y2="28" stroke="#94a3b8" stroke-width="2" stroke-linecap="round"/>
+  <text x="762" y="32" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11" font-weight="500" fill="#64748b">视频管线</text>
+  <line x1="824" y1="28" x2="842" y2="28" stroke="#db2777" stroke-width="2" stroke-linecap="round"/>
+  <text x="848" y="32" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11" font-weight="500" fill="#64748b">HDMI 音频</text>
+  <line x1="922" y1="28" x2="940" y2="28" stroke="#059669" stroke-width="2" stroke-dasharray="4 3" stroke-linecap="round"/>
+  <text x="946" y="32" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11" font-weight="500" fill="#64748b">同步锚点</text>
+  <rect x="30" y="71" width="216" height="138" rx="12" fill="#0f172a" opacity="0.05"/>
+  <rect x="30" y="68" width="216" height="138" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.2"/>
+  <rect x="30" y="68" width="216" height="3.5" fill="#0284c7" clip-path="url(#cardClip0)"/>
+  <rect x="46" y="84" width="88" height="20" rx="10" fill="#e0f2fe"/>
+  <text x="90.0" y="97.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="10" font-weight="700" letter-spacing="0.04em" fill="#0284c7">01 · 信号采集</text>
+  <text x="46" y="126" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="15" font-weight="700" fill="#0f172a">USB HDMI 采集</text>
+  <circle cx="50" cy="146.5" r="2" fill="#0284c7" opacity="0.85"/>
+  <text x="59" y="150" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">AVFoundation UVC 输入</text>
+  <circle cx="50" cy="165.5" r="2" fill="#0284c7" opacity="0.85"/>
+  <text x="59" y="169" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">NV12 · BGRA · HDR10</text>
+  <circle cx="50" cy="184.5" r="2" fill="#0284c7" opacity="0.85"/>
+  <text x="59" y="188" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">自动匹配伴生 HDMI 音频</text>
+  <rect x="278" y="71" width="216" height="138" rx="12" fill="#0f172a" opacity="0.05"/>
+  <rect x="278" y="68" width="216" height="138" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.2"/>
+  <rect x="278" y="68" width="216" height="3.5" fill="#4f46e5" clip-path="url(#cardClip1)"/>
+  <rect x="294" y="84" width="88" height="20" rx="10" fill="#e0e7ff"/>
+  <text x="338.0" y="97.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="10" font-weight="700" letter-spacing="0.04em" fill="#4f46e5">02 · 节奏识别</text>
+  <text x="294" y="126" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="15" font-weight="700" fill="#0f172a">节奏与去重引擎</text>
+  <circle cx="298" cy="146.5" r="2" fill="#4f46e5" opacity="0.85"/>
+  <text x="307" y="150" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">32×18 画面签名比对</text>
+  <circle cx="298" cy="165.5" r="2" fill="#4f46e5" opacity="0.85"/>
+  <text x="307" y="169" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">60 Hz 重复帧智能去重</text>
+  <circle cx="298" cy="184.5" r="2" fill="#4f46e5" opacity="0.85"/>
+  <text x="307" y="188" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">切场识别与抖动补偿</text>
+  <rect x="526" y="71" width="216" height="138" rx="12" fill="#0f172a" opacity="0.05"/>
+  <rect x="526" y="68" width="216" height="138" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.2"/>
+  <rect x="526" y="68" width="216" height="3.5" fill="#ea580c" clip-path="url(#cardClip2)"/>
+  <rect x="542" y="84" width="88" height="20" rx="10" fill="#ffedd5"/>
+  <text x="586.0" y="97.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="10" font-weight="700" letter-spacing="0.04em" fill="#ea580c">03 · 补帧超分</text>
+  <text x="542" y="126" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="15" font-weight="700" fill="#0f172a">混合补帧与超分</text>
+  <circle cx="546" cy="146.5" r="2" fill="#ea580c" opacity="0.85"/>
+  <text x="555" y="150" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">VT 插值 + 媒体引擎运动</text>
+  <circle cx="546" cy="165.5" r="2" fill="#ea580c" opacity="0.85"/>
+  <text x="555" y="169" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">静态 HUD 与文字原生保留</text>
+  <circle cx="546" cy="184.5" r="2" fill="#ea580c" opacity="0.85"/>
+  <text x="555" y="188" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">MetalFX Spatial 10-bit</text>
+  <rect x="774" y="71" width="216" height="138" rx="12" fill="#0f172a" opacity="0.05"/>
+  <rect x="774" y="68" width="216" height="138" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.2"/>
+  <rect x="774" y="68" width="216" height="3.5" fill="#059669" clip-path="url(#cardClip3)"/>
+  <rect x="790" y="84" width="88" height="20" rx="10" fill="#d1fae5"/>
+  <text x="834.0" y="97.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="10" font-weight="700" letter-spacing="0.04em" fill="#059669">04 · 渲染呈现</text>
+  <text x="790" y="126" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="15" font-weight="700" fill="#0f172a">Direct Metal 呈现</text>
+  <circle cx="794" cy="146.5" r="2" fill="#059669" opacity="0.85"/>
+  <text x="803" y="150" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">CAMetalDisplayLink 驱动</text>
+  <circle cx="794" cy="165.5" r="2" fill="#059669" opacity="0.85"/>
+  <text x="803" y="169" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">延迟选帧时间轴调度</text>
+  <circle cx="794" cy="184.5" r="2" fill="#059669" opacity="0.85"/>
+  <text x="803" y="188" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11.2" fill="#475569">HDR10 PQ · EDR · 原画对照</text>
+  <line x1="246" y1="137" x2="275" y2="137" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#arrowVideo)"/>
+  <line x1="494" y1="137" x2="523" y2="137" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#arrowVideo)"/>
+  <line x1="742" y1="137" x2="771" y2="137" stroke="#94a3b8" stroke-width="1.8" marker-end="url(#arrowVideo)"/>
+  <rect x="278" y="261" width="464" height="106" rx="12" fill="#0f172a" opacity="0.05"/>
+  <rect x="278" y="258" width="464" height="106" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.2"/>
+  <rect x="278" y="258" width="464" height="3.5" fill="#db2777" clip-path="url(#audioClip)"/>
+  <rect x="296" y="274" width="74" height="20" rx="10" fill="#fce7f3"/>
+  <text x="333.0" y="287.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="10" font-weight="700" letter-spacing="0.04em" fill="#db2777">音画同步</text>
+  <text x="382" y="289" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="15" font-weight="700" fill="#0f172a">CoreAudio 音画同步引擎</text>
+  <text x="296" y="320" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="12" fill="#475569">自动配对采集卡 HDMI 音频  ·  支持任意 CoreAudio 输出设备</text>
+  <text x="296" y="342" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="12" fill="#475569">平滑时钟速率微调  ·  支持 -40 ms 至 +150 ms 实时手动偏移</text>
+  <path d="M 138 206 L 138 297 Q 138 311 152 311 L 275 311" fill="none" stroke="#db2777" stroke-width="1.8" marker-end="url(#arrowAudio)"/>
+  <rect x="75" y="232" width="126" height="22" rx="11" fill="#f1f5f9" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="138" y="246.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11" font-weight="600" fill="#db2777">伴生 HDMI 音频</text>
+  <path d="M 882 206 L 882 297 Q 882 311 868 311 L 745 311" fill="none" stroke="#059669" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#arrowAnchor)"/>
+  <rect x="813" y="232" width="138" height="22" rx="11" fill="#f1f5f9" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="882" y="246.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11" font-weight="600" fill="#059669">呈现时间戳锚点</text>
+  <text x="510" y="394" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Segoe UI', sans-serif" font-size="11" font-weight="500" fill="#64748b">Swift 6 严格并发 Actor（.userInteractive QoS）   ·   预编译 Metal 3.1 着色器   ·   零拷贝 CVPixelBuffer</text>
+</svg>

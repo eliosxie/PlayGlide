@@ -135,16 +135,13 @@ Play in a window, expanded viewport, or unobstructed fullscreen with **2× real-
 
 PlayGlide is built around a strict-concurrency **Swift 6** actor pipeline (`PlayGlide.pipeline.session` and `PlayGlide.frame.processor` running at `.userInteractive` QoS) paired with custom **Metal 3.1** compute and render shaders.
 
-```mermaid
-flowchart LR
-    A["USB HDMI Capture Card\nAVFoundation UVC + Audio"] --> B["ContentDetector & ContentCadence\n32×18 Signature · Deduplication · Slip Tracking"]
-    B --> C["FrameProcessor\nHybrid VT + Media-Engine Motion\nNative Original Preservation"]
-    C --> D["MetalFX Spatial\nOptional 10-bit Upscaler"]
-    D --> E["FrameMailbox & FrameTimeline\nLate-Selection Deadline Queue"]
-    E --> F["MetalPreviewSurface\nCAMetalDisplayLink Direct Render\nHDR10 PQ / EDR & Split View"]
-    A --> G["CoreAudio Sync Engine\nPresentation-Anchored Slew & Offset"]
-    F -. "Presented Timestamp Anchor" .-> G
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="docs/architecture-light.svg" />
+    <img alt="PlayGlide Architecture Pipeline" src="docs/architecture-light.svg" width="100%" />
+  </picture>
+</p>
 
 ### Project Layout
 
