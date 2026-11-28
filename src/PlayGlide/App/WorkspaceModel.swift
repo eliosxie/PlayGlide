@@ -180,7 +180,7 @@ final class WorkspaceModel: ObservableObject {
         }
         return pressure.message
     }
-    var configurationChanged: Bool { applied != nil && applied != draft }
+    var configurationChanged: Bool { applied.map { $0.hasRelevantChanges(comparedTo: draft) } == true }
     var canHotApplyConfiguration: Bool {
         active && !stopRequested && draft.isAvailableInBuild && applied.map { $0.canHotReconfigure(to: draft) } == true
     }

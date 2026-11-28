@@ -55,16 +55,48 @@ struct SessionDraft: Sendable, Equatable {
             && (source == .captureCard || (source == .testPattern && testSignal.repeats == 2))
     }
 
+    /// True when switching to `next` changes any setting relevant to the active input source.
+    /// Background capture-card discovery updating `deviceID`/`formatID` while running a window
+    /// or test-pattern session must not flag the running configuration as stale.
+    func hasRelevantChanges(comparedTo other: SessionDraft) -> Bool {
+        guard self != other else { return false }
+        guard source == other.source else { return true }
+        let processingDiffers =
+            contentMode != other.contentMode || interpolation != other.interpolation
+            || backend != other.backend || hybridQuality != other.hybridQuality
+            || upscaling != other.upscaling || outputPreset != other.outputPreset
+            || presentationMode != other.presentationMode || powerPreference != other.powerPreference
+        if processingDiffers { return true }
+        switch source {
+        case .captureCard:
+            return deviceID != other.deviceID || formatID != other.formatID
+                || colorMode != other.colorMode || hdrDisplayStyle != other.hdrDisplayStyle
+                || systemHDRPolicy != other.systemHDRPolicy || audioEnabled != other.audioEnabled
+                || audioDeviceID != other.audioDeviceID
+        case .window:
+            return windowSelectionID != other.windowSelectionID || windowSampling != other.windowSampling
+                || windowPreset != other.windowPreset || windowResolution != other.windowResolution
+        case .testPattern:
+            return inputPreset != other.inputPreset || testSignal != other.testSignal
+        }
+    }
+
     /// True when switching to `next` only changes processing/presentation parameters and can
     /// reconfigure `FrameProcessor` in place without restarting capture or HDMI audio.
     func canHotReconfigure(to next: SessionDraft, enabled: Bool = Self.hotReconfigureEnabled) -> Bool {
-        guard enabled, self != next else { return false }
-        return source == next.source && deviceID == next.deviceID && formatID == next.formatID
-            && colorMode == next.colorMode && audioEnabled == next.audioEnabled
-            && audioDeviceID == next.audioDeviceID && windowSelectionID == next.windowSelectionID
-            && windowSampling == next.windowSampling && windowPreset == next.windowPreset
-            && windowResolution == next.windowResolution && inputPreset == next.inputPreset
-            && testSignal == next.testSignal
+        guard enabled, hasRelevantChanges(comparedTo: next) else { return false }
+        guard source == next.source else { return false }
+        switch source {
+        case .captureCard:
+            return deviceID == next.deviceID && formatID == next.formatID
+                && colorMode == next.colorMode && audioEnabled == next.audioEnabled
+                && audioDeviceID == next.audioDeviceID
+        case .window:
+            return windowSelectionID == next.windowSelectionID && windowSampling == next.windowSampling
+                && windowPreset == next.windowPreset && windowResolution == next.windowResolution
+        case .testPattern:
+            return inputPreset == next.inputPreset && testSignal == next.testSignal
+        }
     }
 }
 
